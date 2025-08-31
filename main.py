@@ -1236,7 +1236,6 @@ async def confirm_sizes(call):
     except Exception as e:
         logger.error(f"Ошибка при создании заявки: {e}")
         await bot.send_message(call.message.chat.id, f"❌ Произошла ошибка: {str(e)}. Попробуйте снова.")
-
     finally:
         user_data.pop(user_id, None)
         user_states.pop(user_id, None)
