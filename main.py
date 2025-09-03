@@ -8,6 +8,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from telebot.async_telebot import AsyncTeleBot
 from telebot import types
 import json
+import uuid
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,14 +20,12 @@ logger = logging.getLogger(__name__)
 # Загрузка переменных окружения
 load_dotenv()
 
-
 # Константы для состояний разговора
 (
-    PRODUCT_NAME, COLOR, SIZES_TYPE, SELECT_SIZES, SIZES_QUANTITY, CONFIRM_SIZES,  # Для создания заявки
-    ACTUAL_SIZES_QUANTITY, SIZE_STACKS, FABRIC_USED, PARTICIPANTS, COMMENT, CONFIRM_COMPLETION,  # Для завершения заявки
-    VIEW_REQUESTS,  # Для просмотра заявок
-    COLOR_SELECTION  # Новое состояние для выбора цвета
-) = range(14)
+    PRODUCT_NAME, COLOR, SIZES_TYPE, SELECT_SIZES, SIZES_QUANTITY, CONFIRM_SIZES,
+    ACTUAL_SIZES_QUANTITY, SIZE_STACKS, FABRIC_USED, PARTICIPANTS, COMMENT, CONFIRM_COMPLETION,
+    VIEW_REQUESTS, COLOR_SELECTION, SELECT_COLORS
+) = range(15)
 
 # Проверка TELEGRAM_TOKEN
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8271216736:AAHBqFT4ErMWXXKp0Txozy4ZjtNQJfw56lk")
@@ -51,7 +50,7 @@ GOOGLE_CREDENTIALS = {
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-# Инициализация Google Sheets
+# Инициализация Google Sheets (без изменений)
 def init_sheets():
     try:
         creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_CREDENTIALS, scope)
@@ -100,12 +99,11 @@ def init_sheets():
             })
             logger.info("Создан новый лист CuttingRequests с правильными заголовками")
 
-        # Новый лист для продуктов и цветов
         try:
             products_sheet = spreadsheet.worksheet("Products")
         except gspread.WorksheetNotFound:
             products_sheet = spreadsheet.add_worksheet(title="Products", rows=100, cols=2)
-            products_sheet.append_row(["ProductName", "Colors"])  # Colors - строка с цветами через запятую, напр. "Красный, Синий, Зеленый"
+            products_sheet.append_row(["ProductName", "Colors"])
             products_sheet.format("A1:B1", {
                 "textFormat": {"bold": True},
                 "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}
@@ -119,7 +117,7 @@ def init_sheets():
             "users_sheet": users_sheet,
             "requests_sheet": requests_sheet,
             "cutting_requests_sheet": cutting_requests_sheet,
-            "products_sheet": products_sheet  # Добавлен
+            "products_sheet": products_sheet
         }
     except Exception as e:
         logger.error(f"Ошибка при инициализации Google Sheets: {e}")
@@ -130,8 +128,9 @@ sheets_data = init_sheets()
 users_sheet = sheets_data["users_sheet"]
 requests_sheet = sheets_data["requests_sheet"]
 cutting_requests_sheet = sheets_data["cutting_requests_sheet"]
-products_sheet = sheets_data["products_sheet"]  # Добавлен
-# Проверка авторизации
+products_sheet = sheets_data["products_sheet"]
+
+# Проверка авторизации (без изменений)
 def is_authorized(user_id: int) -> bool:
     try:
         users = users_sheet.get_all_records()
@@ -143,7 +142,7 @@ def is_authorized(user_id: int) -> bool:
         logger.error(f"Ошибка при проверке авторизации: {e}")
         return False
 
-# Проверка роли
+# Проверка роли (без изменений)
 def get_user_role(user_id: int) -> str:
     try:
         users = users_sheet.get_all_records()
@@ -155,7 +154,7 @@ def get_user_role(user_id: int) -> str:
         logger.error(f"Ошибка при получении роли для ID {user_id}: {e}")
         return None
 
-# Проверка наличия ожидающей заявки
+# Проверка наличия ожидающей заявки (без изменений)
 def has_pending_request(user_id: int) -> bool:
     try:
         requests = requests_sheet.get_all_records()
@@ -203,6 +202,7 @@ async def start(message):
     reply_markup = types.InlineKeyboardMarkup(keyboard)
     await bot.send_message(message.chat.id, "Добро пожаловать! Выберите действие:", reply_markup=reply_markup)
 
+
 @bot.callback_query_handler(func=lambda call: True)
 async def button_handler(call):
     await bot.answer_callback_query(call.id)
@@ -211,8 +211,16 @@ async def button_handler(call):
     logger.info(f"Обработка callback для пользователя {user_id}, данные: {callback_data}")
 
     state = user_states.get(user_id, None)
-    if state in [SIZES_TYPE, SELECT_SIZES, CONFIRM_SIZES] and callback_data in ["sizes_adult", "sizes_child", "sizes_done"] or callback_data.startswith("size_") or callback_data in ["confirm_sizes", "cancel_request"]:
-        if callback_data in ["sizes_adult", "sizes_child"]:
+
+    # Обработка состояний, связанных с выбором цветов, размеров и подтверждением
+    if state in [SELECT_COLORS, SIZES_TYPE, SELECT_SIZES, CONFIRM_SIZES] and (
+        callback_data in ["sizes_adult", "sizes_child", "sizes_done", "colors_done", "confirm_sizes", "cancel_request"] or
+        callback_data.startswith("color_") or
+        callback_data.startswith("size_")
+    ):
+        if callback_data.startswith("color_") or callback_data == "colors_done":
+            await select_colors(call)
+        elif callback_data in ["sizes_adult", "sizes_child"]:
             await process_sizes_type(call)
         elif callback_data.startswith("size_") or callback_data == "sizes_done":
             await select_sizes(call)
@@ -222,20 +230,52 @@ async def button_handler(call):
             await cancel_request(call)
         return
 
-    if state in [ACTUAL_SIZES_QUANTITY, SIZE_STACKS, FABRIC_USED, PARTICIPANTS, COMMENT, CONFIRM_COMPLETION] and callback_data.startswith("confirmcomplete_") or callback_data.startswith("edit_completion_") or callback_data.startswith("cancel_completion_"):
+    # Обработка состояний, связанных с завершением заявки (включая частичное)
+    if state in [ACTUAL_SIZES_QUANTITY, SIZE_STACKS, FABRIC_USED, PARTICIPANTS, COMMENT, CONFIRM_COMPLETION] and (
+        callback_data.startswith("confirmcomplete_") or
+        callback_data.startswith("edit_completion_") or
+        callback_data.startswith("cancel_completion_") or
+        callback_data.startswith("proceed_completion_") or
+        callback_data.startswith("complete_without_data_") or
+        callback_data.startswith("partial_complete_") or
+        callback_data.startswith("final_complete_")
+    ):
         if callback_data.startswith("confirmcomplete_"):
-            await confirmcompletion(call)
+            await confirm_completion(call)
         elif callback_data.startswith("edit_completion_"):
             await edit_completion(call)
         elif callback_data.startswith("cancel_completion_"):
             await cancel_completion(call)
+        elif callback_data.startswith("proceed_completion_"):
+            request_id = callback_data.replace("proceed_completion_", "")
+            if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+                await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+                return
+            actual_selected_sizes = user_data[user_id]['requests'][request_id]['actual_selected_sizes']
+            if not actual_selected_sizes:
+                await bot.edit_message_text("❌ В заявке нет размеров для ввода.", call.message.chat.id, call.message.message_id)
+                return
+            first_size = actual_selected_sizes[0]
+            keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.edit_message_text(
+                f"Введите фактическое количество для размера {first_size}:",
+                call.message.chat.id, call.message.message_id,
+                reply_markup=reply_markup
+            )
+            user_states[user_id] = ACTUAL_SIZES_QUANTITY
+        elif callback_data.startswith("complete_without_data_"):
+            request_id = callback_data.replace("complete_without_data_", "")
+            await complete_without_data(call, request_id)
+        elif callback_data.startswith("partial_complete_"):
+            request_id = callback_data.replace("partial_complete_", "")
+            await partial_complete(call)
+        elif callback_data.startswith("final_complete_"):
+            request_id = callback_data.replace("final_complete_", "")
+            await final_complete(call)
         return
 
-    # Новое: обработка выбора цвета
-    if state == COLOR_SELECTION and callback_data.startswith("color_"):
-        await select_color(call)
-        return
-
+    # Обработка для неавторизованных пользователей
     if not is_authorized(user_id):
         if callback_data == "submit_request":
             if has_pending_request(user_id):
@@ -254,20 +294,22 @@ async def button_handler(call):
 
         elif callback_data in ["request_cutter", "request_seamstress"]:
             role = "Раскройщик" if callback_data == "request_cutter" else "Швея"
-            name = call.from_user.first_name or "Unknown"
+            name = call.from_user.full_name or "Unknown"
             requests_sheet.append_row([str(user_id), name, role, "Pending"])
             logger.info(f"Заявка от {user_id} ({name}) на роль {role} добавлена")
 
             keyboard = [[types.InlineKeyboardButton("Подать заявку", callback_data="submit_request")]]
             reply_markup = types.InlineKeyboardMarkup(keyboard)
-            await bot.edit_message_text(f"Ваша заявка на роль {role} отправлена на рассмотрение!",
-                                          call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+            await bot.edit_message_text(
+                f"Ваша заявка на роль {role} отправлена на рассмотрение!",
+                call.message.chat.id, call.message.message_id, reply_markup=reply_markup
+            )
 
         elif callback_data == "start_callback":
             await start_callback(call)
-
         return
 
+    # Обработка для авторизованных пользователей
     if callback_data == "view_requests":
         await view_requests(call)
         return
@@ -334,11 +376,11 @@ async def button_handler(call):
                                        datetime.now().strftime("%Y-%m-%d")])
                 requests_sheet.delete_rows(row_idx)
                 await bot.answer_callback_query(call.id, f"Заявка от {requests[row_idx - 2].get('Name', 'Unknown')} одобрена и удалена!",
-                                   show_alert=True)
+                                               show_alert=True)
             else:
                 requests_sheet.delete_rows(row_idx)
                 await bot.answer_callback_query(call.id, f"Заявка от {requests[row_idx - 2].get('Name', 'Unknown')} отклонена и удалена!",
-                                   show_alert=True)
+                                               show_alert=True)
         except Exception as e:
             logger.error(f"Ошибка при {action} заявки ID {req_id}: {e}")
             await bot.edit_message_text(f"Ошибка при обработке заявки: {str(e)}", call.message.chat.id, call.message.message_id)
@@ -364,7 +406,8 @@ async def button_handler(call):
     elif callback_data == "back_to_admin":
         keyboard = [
             [types.InlineKeyboardButton("👥 Просмотр заявок на роли", callback_data="requests")],
-            [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")]
+            [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")],
+            [types.InlineKeyboardButton("📋 Просмотреть заявки на раскрой", callback_data="view_requests")]
         ]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
         await bot.edit_message_text("Главное меню администратора:", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
@@ -376,11 +419,85 @@ async def button_handler(call):
         request_id = callback_data.replace("accept_", "")
         await accept_request(call, request_id)
 
+    elif callback_data.startswith("continue_request_"):
+        request_id = callback_data.replace("continue_request_", "")
+        await continue_request(call, request_id)
+
     elif callback_data == "back_to_cutter":
         await back_to_cutter(call)
 
     elif callback_data.startswith("complete_"):
         await complete_request(call)
+
+async def complete_without_data(call, request_id: str):
+    user_id = call.from_user.id
+
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id][
+        'requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id,
+                                    call.message.message_id)
+        return
+
+    try:
+        row_idx = user_data[user_id]['requests'][request_id]['row_idx']
+        current_status = cutting_requests_sheet.cell(row_idx, 6).value
+        if current_status == "Выполнена":
+            await bot.edit_message_text("❌ Эта заявка уже выполнена.", call.message.chat.id, call.message.message_id)
+            return
+
+        cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
+        if str(cutter_id) != str(user_id):
+            await bot.edit_message_text("❌ Вы не можете завершить эту заявку.", call.message.chat.id,
+                                        call.message.message_id)
+            return
+
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
+        sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
+        ordered_sizes_dict = json.loads(sizes_json) if sizes_json else {}
+        admin_id = cutting_requests_sheet.cell(row_idx, 7).value
+
+        # Обновляем статус заявки на "Выполнена" без фактических данных
+        cutting_requests_sheet.update_cell(row_idx, 6, "Выполнена")
+
+        # Уведомляем администратора
+        admin_message = (
+            f"✅ Заявка {request_id} завершена без ввода фактических данных!\n"
+            f"Раскройщик: {call.from_user.full_name}\n"
+            f"Изделие: {product_name}\n"
+            f"Цвет ткани: {color}\n"
+            f"Заказано:\n"
+        )
+        for size, qty in sorted(ordered_sizes_dict.items()):
+            admin_message += f"  {size}: {qty}\n"
+
+        try:
+            await bot.send_message(admin_id, admin_message)
+        except Exception as e:
+            logger.error(f"Ошибка уведомления администратора: {e}")
+
+        keyboard = [
+            [types.InlineKeyboardButton("📋 Посмотреть другие заявки", callback_data="view_requests")]
+        ]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+
+        await bot.edit_message_text(
+            "✅ Заявка завершена без ввода фактических данных!",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=reply_markup
+        )
+
+        # Очистка данных
+        if 'requests' in user_data[user_id] and request_id in user_data[user_id]['requests']:
+            del user_data[user_id]['requests'][request_id]
+        if user_data[user_id].get('current_request_id') == request_id:
+            user_data[user_id].pop('current_request_id', None)
+        user_states.pop(user_id, None)
+
+    except Exception as e:
+        logger.error(f"Ошибка завершения заявки {request_id} без данных: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка при завершении заявки.", call.message.chat.id,
+                                    call.message.message_id)
 
 @bot.message_handler(func=lambda message: True)
 async def text_handler(message):
@@ -404,6 +521,684 @@ async def text_handler(message):
     elif state == COMMENT:
         await process_comment(message)
 
+async def process_product_name(message):
+    user_id = message.from_user.id
+    product_name = message.text.strip()
+
+    if not product_name:
+        await bot.send_message(message.chat.id, "❌ Название изделия не может быть пустым. Попробуйте снова:")
+        return
+
+    user_data[user_id] = {
+        'product_name': product_name,
+        'selected_colors': [],
+        'sizes_dict_per_color': {},
+        'current_color_index': 0
+    }
+
+    try:
+        products = products_sheet.get_all_records()
+        colors_list = []
+        for prod in products:
+            if prod.get("ProductName", "").strip().lower() == product_name.lower():
+                colors_str = prod.get("Colors", "")
+                if colors_str:
+                    colors_list = [c.strip() for c in colors_str.split(",")]
+                break
+
+        if colors_list:
+            keyboard = []
+            row = []
+            for color in colors_list:
+                row.append(types.InlineKeyboardButton(color, callback_data=f"color_{color}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+            keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="colors_done")])
+            keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.send_message(message.chat.id, f"Выберите цвета для изделия '{product_name}' (можно выбрать несколько):", reply_markup=reply_markup)
+            user_states[user_id] = SELECT_COLORS
+        else:
+            keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.send_message(message.chat.id, "Цвета не найдены для этого изделия. Введите цвет ткани вручную:", reply_markup=reply_markup)
+            user_states[user_id] = COLOR
+    except Exception as e:
+        logger.error(f"Ошибка при получении цветов для продукта {product_name}: {e}")
+        await bot.send_message(message.chat.id, "❌ Ошибка при загрузке цветов. Введите цвет вручную:")
+        user_states[user_id] = COLOR
+
+async def select_colors(call):
+    user_id = call.from_user.id
+    callback_data = call.data
+
+    if callback_data == "colors_done":
+        if not user_data[user_id].get('selected_colors'):
+            await bot.send_message(call.message.chat.id, "❌ Выберите хотя бы один цвет!")
+            return
+        user_data[user_id]['current_color_index'] = 0
+        first_color = user_data[user_id]['selected_colors'][0]
+        user_data[user_id]['sizes_dict_per_color'][first_color] = {
+            'sizes_type': None,
+            'selected_sizes': [],
+            'sizes_dict': {},
+            'current_size_index': 0
+        }
+        keyboard = [
+            [types.InlineKeyboardButton("Взрослые (34-64)", callback_data="sizes_adult")],
+            [types.InlineKeyboardButton("Детские (122-158)", callback_data="sizes_child")],
+            [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
+        ]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.edit_message_text(f"Выберите тип размеров для цвета '{first_color}':", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+        user_states[user_id] = SIZES_TYPE
+        return
+
+    elif callback_data.startswith("color_"):
+        color = callback_data.replace("color_", "")
+        selected_colors = user_data[user_id]['selected_colors']
+        if color in selected_colors:
+            selected_colors.remove(color)
+            user_data[user_id]['sizes_dict_per_color'].pop(color, None)
+            await bot.answer_callback_query(call.id, f"Цвет {color} убран из выбора")
+        else:
+            selected_colors.append(color)
+            await bot.answer_callback_query(call.id, f"Цвет {color} добавлен")
+
+        try:
+            products = products_sheet.get_all_records()
+            colors_list = []
+            for prod in products:
+                if prod.get("ProductName", "").strip().lower() == user_data[user_id]['product_name'].lower():
+                    colors_str = prod.get("Colors", "")
+                    if colors_str:
+                        colors_list = [c.strip() for c in colors_str.split(",")]
+                    break
+
+            keyboard = []
+            row = []
+            for color in colors_list:
+                text = f"✅{color} " if color in selected_colors else color
+                row.append(types.InlineKeyboardButton(text, callback_data=f"color_{color}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+            keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="colors_done")])
+            keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении выбора цветов: {e}")
+            await bot.edit_message_text("❌ Произошла ошибка при выборе цветов.", call.message.chat.id, call.message.message_id)
+
+async def process_color(message):
+    user_id = message.from_user.id
+    color = message.text.strip()
+
+    if not color:
+        await bot.send_message(message.chat.id, "❌ Цвет ткани не может быть пустым. Попробуйте снова:")
+        return
+
+    user_data[user_id]['selected_colors'] = [color]
+    user_data[user_id]['sizes_dict_per_color'][color] = {
+        'sizes_type': None,
+        'selected_sizes': [],
+        'sizes_dict': {},
+        'current_size_index': 0
+    }
+    user_data[user_id]['current_color_index'] = 0
+
+    keyboard = [
+        [types.InlineKeyboardButton("Взрослые (34-64)", callback_data="sizes_adult")],
+        [types.InlineKeyboardButton("Детские (122-158)", callback_data="sizes_child")],
+        [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
+    ]
+    reply_markup = types.InlineKeyboardMarkup(keyboard)
+    await bot.send_message(message.chat.id, f"Выберите тип размеров для цвета '{color}':", reply_markup=reply_markup)
+    user_states[user_id] = SIZES_TYPE
+
+async def process_sizes_type(call):
+    user_id = call.from_user.id
+    current_color_index = user_data[user_id]['current_color_index']
+    current_color = user_data[user_id]['selected_colors'][current_color_index]
+    sizes_type = "adult" if call.data == "sizes_adult" else "child"
+
+    user_data[user_id]['sizes_dict_per_color'][current_color]['sizes_type'] = sizes_type
+    user_data[user_id]['sizes_dict_per_color'][current_color]['selected_sizes'] = []
+    user_data[user_id]['sizes_dict_per_color'][current_color]['sizes_dict'] = {}
+
+    start, end, step = (34, 64, 2) if sizes_type == "adult" else (122, 158, 6)
+    valid_sizes = list(range(start, end + 1, step))
+
+    keyboard = []
+    row = []
+    for size in valid_sizes:
+        row.append(types.InlineKeyboardButton(str(size), callback_data=f"size_{size}"))
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="sizes_done")])
+    keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
+
+    reply_markup = types.InlineKeyboardMarkup(keyboard)
+    await bot.edit_message_text(
+        f"Выберите размеры для цвета '{current_color}' (нажмите на нужные размеры, затем 'Готово'):",
+        call.message.chat.id, call.message.message_id,
+        reply_markup=reply_markup
+    )
+    user_states[user_id] = SELECT_SIZES
+
+async def select_sizes(call):
+    user_id = call.from_user.id
+    callback_data = call.data
+    current_color_index = user_data[user_id]['current_color_index']
+    current_color = user_data[user_id]['selected_colors'][current_color_index]
+
+    if callback_data == "sizes_done":
+        if not user_data[user_id]['sizes_dict_per_color'][current_color].get('selected_sizes'):
+            await bot.send_message(call.message.chat.id, "❌ Выберите хотя бы один размер!")
+            return
+
+        user_data[user_id]['sizes_dict_per_color'][current_color]['current_size_index'] = 0
+        size = user_data[user_id]['sizes_dict_per_color'][current_color]['selected_sizes'][0]
+        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(call.message.chat.id, f"Введите количество для размера {size} (цвет: {current_color}):", reply_markup=reply_markup)
+        user_states[user_id] = SIZES_QUANTITY
+        return
+
+    elif callback_data.startswith("size_"):
+        size = int(callback_data.replace("size_", ""))
+        selected_sizes = user_data[user_id]['sizes_dict_per_color'][current_color]['selected_sizes']
+        if size in selected_sizes:
+            selected_sizes.remove(size)
+            await bot.answer_callback_query(call.id, f"Размер {size} убран из выбора")
+        else:
+            selected_sizes.append(size)
+            await bot.answer_callback_query(call.id, f"Размер {size} добавлен")
+
+        sizes_type = user_data[user_id]['sizes_dict_per_color'][current_color]['sizes_type']
+        start, end, step = (34, 64, 2) if sizes_type == "adult" else (122, 158, 6)
+        valid_sizes = list(range(start, end + 1, step))
+
+        keyboard = []
+        row = []
+        for size in valid_sizes:
+            text = f"{size} ✅" if size in selected_sizes else str(size)
+            row.append(types.InlineKeyboardButton(text, callback_data=f"size_{size}"))
+            if len(row) == 5:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="sizes_done")])
+        keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
+
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+
+
+async def process_sizes_quantity(message):
+    user_id = message.from_user.id
+    current_color_index = user_data[user_id]['current_color_index']
+    current_color = user_data[user_id]['selected_colors'][current_color_index]
+    current_size_index = user_data[user_id]['sizes_dict_per_color'][current_color]['current_size_index']
+    selected_sizes = user_data[user_id]['sizes_dict_per_color'][current_color]['selected_sizes']
+
+    try:
+        quantity = int(message.text.strip())
+        if quantity < 0:
+            await bot.send_message(message.chat.id, "❌ Количество не может быть отрицательным. Попробуйте снова:")
+            return
+    except ValueError:
+        await bot.send_message(message.chat.id, "❌ Пожалуйста, введите число. Попробуйте снова:")
+        return
+
+    user_data[user_id]['sizes_dict_per_color'][current_color]['sizes_dict'][
+        selected_sizes[current_size_index]] = quantity
+    current_size_index += 1
+    user_data[user_id]['sizes_dict_per_color'][current_color]['current_size_index'] = current_size_index
+
+    if current_size_index < len(selected_sizes):
+        next_size = selected_sizes[current_size_index]
+        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(message.chat.id, f"Введите количество для размера {next_size} (цвет: {current_color}):",
+                               reply_markup=reply_markup)
+        return
+    else:
+        current_color_index += 1
+        user_data[user_id]['current_color_index'] = current_color_index
+        if current_color_index < len(user_data[user_id]['selected_colors']):
+            next_color = user_data[user_id]['selected_colors'][current_color_index]
+            user_data[user_id]['sizes_dict_per_color'][next_color] = {
+                'sizes_type': None,
+                'selected_sizes': [],
+                'sizes_dict': {},
+                'current_size_index': 0
+            }
+            keyboard = [
+                [types.InlineKeyboardButton("Взрослые (34-64)", callback_data="sizes_adult")],
+                [types.InlineKeyboardButton("Детские (122-158)", callback_data="sizes_child")],
+                [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
+            ]
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.send_message(message.chat.id, f"Выберите тип размеров для цвета '{next_color}':",
+                                   reply_markup=reply_markup)
+            user_states[user_id] = SIZES_TYPE
+            return
+        else:
+            total_quantity = 0
+            for color in user_data[user_id]['selected_colors']:
+                total_quantity += sum(user_data[user_id]['sizes_dict_per_color'][color]['sizes_dict'].values())
+
+            if total_quantity == 0:
+                await bot.send_message(message.chat.id, "❌ Общее количество не может быть нулевым. Начните заново:")
+                await start_cutting_request(
+                    types.CallbackQuery(id=str(uuid.uuid4()), from_user=message.from_user, message=message,
+                                        data="new_cutting_request"))
+                return
+
+            user_data[user_id]['quantity'] = total_quantity
+            confirmation_text = "✅ Подтвердите данные:\n\n"
+            confirmation_text += f"Изделие: {user_data[user_id]['product_name']}\n"
+            for color in user_data[user_id]['selected_colors']:
+                sizes_type = user_data[user_id]['sizes_dict_per_color'][color]['sizes_type']
+                confirmation_text += f"\nЦвет: {color}\n"
+                confirmation_text += f"Тип размеров: {'Взрослые' if sizes_type == 'adult' else 'Детские'}\n"
+                confirmation_text += "Размеры и количества:\n"
+                for size, qty in sorted(user_data[user_id]['sizes_dict_per_color'][color]['sizes_dict'].items()):
+                    confirmation_text += f"  {size}: {qty}\n"
+            confirmation_text += f"\nОбщее количество: {total_quantity}"
+
+            keyboard = [
+                [types.InlineKeyboardButton("✔ Подтвердить", callback_data="confirm_sizes")],
+                [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
+            ]
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.send_message(message.chat.id, confirmation_text, reply_markup=reply_markup)
+            user_states[user_id] = CONFIRM_SIZES
+
+async def confirm_sizes(call):
+    user_id = call.from_user.id
+
+    try:
+        data = user_data[user_id]
+        product_name = data.get('product_name', 'Не указано')
+        colors = data.get('selected_colors', ['Не указан'])
+        admin_id = user_id
+        admin_name = call.from_user.full_name
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        request_ids = []
+        for color in colors:
+            sizes_type = data['sizes_dict_per_color'][color]['sizes_type']
+            sizes_dict = data['sizes_dict_per_color'][color]['sizes_dict']
+            sizes_type_ru = "Взрослые" if sizes_type == "adult" else "Детские"
+            sizes_json = json.dumps(sizes_dict)
+            total_quantity = sum(sizes_dict.values())
+            request_id = f"CR-{datetime.now().strftime('%Y%m%d%H%M%S')}-{color[:3]}-{str(uuid.uuid4())[:8]}"
+            cutting_requests_sheet.append_row([
+                request_id, created_at, product_name, color, total_quantity, "Новая",
+                admin_id, admin_name, "", "", "", "", "", "", "", "", sizes_type_ru, sizes_json, ""
+            ])
+            request_ids.append(request_id)
+            await notify_cutters(bot, request_id, created_at, product_name, sizes_dict)
+
+        confirmation_text = "✅ Заявки на раскрой созданы!\n\n"
+        confirmation_text += f"ID заявок: {', '.join(request_ids)}\n"
+        confirmation_text += f"Изделие: {product_name}\n"
+        for color in colors:
+            sizes_type = data['sizes_dict_per_color'][color]['sizes_type']
+            confirmation_text += f"\nЦвет: {color}\n"
+            confirmation_text += f"Тип размеров: {'Взрослые' if sizes_type == 'adult' else 'Детские'}\n"
+            confirmation_text += "Размеры и количества:\n"
+            for size, qty in sorted(data['sizes_dict_per_color'][color]['sizes_dict'].items()):
+                confirmation_text += f"  {size}: {qty}\n"
+        confirmation_text += f"\nДата: {created_at}"
+
+        keyboard = [[types.InlineKeyboardButton("➕ Создать новую заявку", callback_data="new_cutting_request")]]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(call.message.chat.id, confirmation_text, reply_markup=reply_markup)
+
+    except Exception as e:
+        logger.error(f"Ошибка при создании заявки: {e}")
+        await bot.send_message(call.message.chat.id, f"❌ Произошла ошибка: {str(e)}. Попробуйте снова.")
+    finally:
+        user_data.pop(user_id, None)
+        user_states.pop(user_id, None)
+
+async def confirm_completion(call):
+    request_id = call.data.replace("confirmcomplete_", "")
+    user_id = call.from_user.id
+
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+        return
+
+    try:
+        data = user_data[user_id]['requests'][request_id]
+        row_idx = data['row_idx']
+        current_status = cutting_requests_sheet.cell(row_idx, 6).value
+        if current_status == "Выполнена":
+            await bot.edit_message_text("❌ Эта заявка уже выполнена.", call.message.chat.id, call.message.message_id)
+            return
+
+        cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
+        if str(cutter_id) != str(user_id):
+            await bot.edit_message_text("❌ Вы не можете завершить эту заявку.", call.message.chat.id, call.message.message_id)
+            return
+
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
+        ordered_quantity = sum(data['ordered_sizes_dict'].values())
+        actual_quantity = data['actual_quantity']
+
+        # Формируем текст подтверждения
+        confirmation_text = (
+            f"📋 Подтвердите данные для заявки {request_id}:\n\n"
+            f"Изделие: {product_name}\n"
+            f"Цвет ткани: {color}\n"
+            f"Заказано: {ordered_quantity}\n"
+            f"Фактически выполнено: {actual_quantity}\n"
+            f"Размеры (фактически):\n"
+        )
+        for size, qty in sorted(data['actual_sizes_dict'].items()):
+            stacks = data['stacks_dict'].get(size, 0)
+            confirmation_text += f"  {size}: {qty} (стопок: {stacks})\n"
+        confirmation_text += (
+            f"Расход ткани: {data['fabric_used']} м\n"
+            f"Участники: {data['participants']}\n"
+            f"Номер маршрутного листа: {data['route_list_number']}\n"
+        )
+
+        # Определяем, частичное ли завершение
+        is_partial = actual_quantity < ordered_quantity
+        keyboard = [
+            [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"final_complete_{request_id}")]
+        ]
+        if is_partial:
+            keyboard.append([types.InlineKeyboardButton("📍 Закрыть частично", callback_data=f"partial_complete_{request_id}")])
+        keyboard.append([types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_completion_{request_id}")])
+        keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")])
+
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.edit_message_text(
+            confirmation_text,
+            call.message.chat.id, call.message.message_id,
+            reply_markup=reply_markup
+        )
+        user_states[user_id] = CONFIRM_COMPLETION
+
+    except Exception as e:
+        logger.error(f"Ошибка при подтверждении заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка при подтверждении данных.", call.message.chat.id, call.message.message_id)
+
+async def final_complete(call):
+    request_id = call.data.replace("final_complete_", "")
+    user_id = call.from_user.id
+
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+        return
+
+    try:
+        data = user_data[user_id]['requests'][request_id]
+        row_idx = data['row_idx']
+        current_status = cutting_requests_sheet.cell(row_idx, 6).value
+        if current_status == "Выполнена":
+            await bot.edit_message_text("❌ Эта заявка уже выполнена.", call.message.chat.id, call.message.message_id)
+            return
+
+        cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
+        if str(cutter_id) != str(user_id):
+            await bot.edit_message_text("❌ Вы не можете завершить эту заявку.", call.message.chat.id, call.message.message_id)
+            return
+
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
+        actual_sizes_json = json.dumps(data['actual_sizes_dict'])
+        total_stacks = sum(data['stacks_dict'].values())
+        actual_quantity = data['actual_quantity']
+
+        # Обновляем Google Sheets
+        updates = [
+            (row_idx, 11, actual_quantity),
+            (row_idx, 12, total_stacks),
+            (row_idx, 13, data['fabric_used']),
+            (row_idx, 14, data['participants']),
+            (row_idx, 15, data['route_list_number']),
+            (row_idx, 16, f'=M{row_idx}/K{row_idx}'),
+            (row_idx, 19, actual_sizes_json),
+            (row_idx, 6, "Выполнена")  # Устанавливаем статус "Выполнена"
+        ]
+
+        for row, col, value in updates:
+            cutting_requests_sheet.update_cell(row, col, value)
+
+        # Создаем лист
+        spreadsheet = sheets_data["spreadsheet"]
+        try:
+            route_list_number = data['route_list_number']
+            sheet_title = f"{route_list_number}-{color}"
+            new_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=50, cols=9)
+            new_sheet.append_row([
+                "Наименование изделия", "Размер", "Количество (заказано)", "Фактическое количество",
+                "Количество стопок", "Цвет ткани", "Расход ткани (м)", "Расход на единицу (м)", "Участники"
+            ])
+            new_sheet.format("A1:I1", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
+            new_sheet.format("A2:I100", {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}}})
+            new_sheet.format("D2:D100", {"backgroundColor": {"red": 0.8, "green": 1.0, "blue": 0.8}})
+            row = 2
+            for size in sorted(data['ordered_sizes_dict'].keys()):
+                ordered_qty = data['ordered_sizes_dict'].get(size, 0)
+                actual_qty = data['actual_sizes_dict'].get(size, 0)
+                stacks = data['stacks_dict'].get(size, 0)
+                fabric_per_unit = data['fabric_used'] / actual_quantity if actual_quantity > 0 else 0
+                new_sheet.append_row([
+                    product_name, size, ordered_qty, actual_qty, stacks,
+                    color, data['fabric_used'], round(fabric_per_unit, 2), data['participants']
+                ])
+                row += 1
+            new_sheet.append_row(["Номер маршрутного листа", route_list_number, "", "", "", "", "", "", ""])
+            logger.info(f"Создан лист {sheet_title}")
+        except Exception as e:
+            logger.error(f"Ошибка создания листа: {e}")
+
+        # Уведомляем администратора
+        admin_id = cutting_requests_sheet.cell(row_idx, 7).value
+        admin_message = (
+            f"✅ Заявка {request_id} полностью завершена!\n"
+            f"Раскройщик: {call.from_user.full_name}\n"
+            f"Изделие: {product_name}\n"
+            f"Цвет ткани: {color}\n"
+            f"Номер маршрутного листа: {data['route_list_number']}\n"
+            f"Фактическое количество: {actual_quantity}\n"
+            f"Расход ткани: {data['fabric_used']} м\n"
+            f"Расход на единицу: {round(data['fabric_used'] / actual_quantity if actual_quantity > 0 else 0, 2)} м\n"
+            f"Участники: {data['participants']}\n"
+            f"Сводка размеров (фактически):\n"
+        )
+        for size, qty in sorted(data['actual_sizes_dict'].items()):
+            stacks = data['stacks_dict'].get(size, 0)
+            admin_message += f"  {size}: {qty} (стопок: {stacks})\n"
+
+        try:
+            await bot.send_message(admin_id, admin_message)
+        except Exception as e:
+            logger.error(f"Ошибка уведомления администратора: {e}")
+
+        keyboard = [
+            [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
+        ]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+
+        await bot.edit_message_text(
+            f"✅ Заявка {request_id} полностью завершена!",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=reply_markup
+        )
+
+        # Очистка данных
+        del user_data[user_id]['requests'][request_id]
+        if user_data[user_id].get('current_request_id') == request_id:
+            user_data[user_id].pop('current_request_id', None)
+        user_states.pop(user_id, None)
+
+    except Exception as e:
+        logger.error(f"Ошибка полного завершения заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка при завершении заявки.", call.message.chat.id, call.message.message_id)
+
+async def partial_complete(call):
+    request_id = call.data.replace("partial_complete_", "")
+    user_id = call.from_user.id
+
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+        return
+
+    try:
+        data = user_data[user_id]['requests'][request_id]
+        row_idx = data['row_idx']
+        current_status = cutting_requests_sheet.cell(row_idx, 6).value
+        if current_status == "Выполнена":
+            await bot.edit_message_text("❌ Эта заявка уже выполнена.", call.message.chat.id, call.message.message_id)
+            return
+
+        cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
+        if str(cutter_id) != str(user_id):
+            await bot.edit_message_text("❌ Вы не можете завершить эту заявку.", call.message.chat.id, call.message.message_id)
+            return
+
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
+        actual_sizes_json = json.dumps(data['actual_sizes_dict'])
+        total_stacks = sum(data['stacks_dict'].values())
+        ordered_quantity = sum(data['ordered_sizes_dict'].values())
+        actual_quantity = data['actual_quantity']
+
+        # Обновляем ordered_sizes_dict, вычитая фактические количества
+        updated_sizes_dict = {}
+        for size in data['ordered_sizes_dict']:
+            updated_sizes_dict[size] = data['ordered_sizes_dict'][size] - data['actual_sizes_dict'].get(size, 0)
+        updated_sizes_json = json.dumps(updated_sizes_dict)
+
+        # Накопление фактических данных
+        existing_actual_sizes = cutting_requests_sheet.cell(row_idx, 19).value
+        new_actual_sizes = actual_sizes_json if not existing_actual_sizes else f"{existing_actual_sizes};{actual_sizes_json}"
+
+        # Обновляем Google Sheets
+        updates = [
+            (row_idx, 11, actual_quantity),  # Фактическое количество (для текущей итерации)
+            (row_idx, 12, total_stacks),
+            (row_idx, 13, data['fabric_used']),
+            (row_idx, 14, data['participants']),
+            (row_idx, 15, data['route_list_number']),
+            (row_idx, 16, f'=M{row_idx}/K{row_idx}'),  # Расход на единицу
+            (row_idx, 18, updated_sizes_json),  # Обновляем заказанные размеры
+            (row_idx, 19, new_actual_sizes),  # Накопление фактических
+            (row_idx, 5, sum(updated_sizes_dict.values()))  # Обновляем общее количество
+        ]
+
+        for row, col, value in updates:
+            cutting_requests_sheet.update_cell(row, col, value)
+
+        # Создаем частичный лист
+        spreadsheet = sheets_data["spreadsheet"]
+        try:
+            route_list_number = data['route_list_number']
+            part_number = len(cutting_requests_sheet.cell(row_idx, 19).value.split(';')) if cutting_requests_sheet.cell(row_idx, 19).value else 1
+            sheet_title = f"{route_list_number}-{color}-partial-{part_number}"
+            new_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=50, cols=9)
+            new_sheet.append_row([
+                "Наименование изделия", "Размер", "Количество (заказано)", "Фактическое количество",
+                "Количество стопок", "Цвет ткани", "Расход ткани (м)", "Расход на единицу (м)", "Участники"
+            ])
+            new_sheet.format("A1:I1", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
+            new_sheet.format("A2:I100", {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}}})
+            new_sheet.format("D2:D100", {"backgroundColor": {"red": 0.8, "green": 1.0, "blue": 0.8}})
+            row = 2
+            for size in sorted(data['ordered_sizes_dict'].keys()):
+                ordered_qty = data['ordered_sizes_dict'].get(size, 0)
+                actual_qty = data['actual_sizes_dict'].get(size, 0)
+                stacks = data['stacks_dict'].get(size, 0)
+                fabric_per_unit = data['fabric_used'] / actual_quantity if actual_quantity > 0 else 0
+                new_sheet.append_row([
+                    product_name, size, ordered_qty, actual_qty, stacks,
+                    color, data['fabric_used'], round(fabric_per_unit, 2), data['participants']
+                ])
+                row += 1
+            new_sheet.append_row(["Номер маршрутного листа", route_list_number, "", "", "", "", "", "", ""])
+            logger.info(f"Создан частичный лист {sheet_title}")
+        except Exception as e:
+            logger.error(f"Ошибка создания листа: {e}")
+
+        # Уведомляем администратора
+        admin_id = cutting_requests_sheet.cell(row_idx, 7).value
+        admin_message = (
+            f"✅ Заявка {request_id} частично завершена!\n"
+            f"Раскройщик: {call.from_user.full_name}\n"
+            f"Изделие: {product_name}\n"
+            f"Цвет ткани: {color}\n"
+            f"Номер маршрутного листа: {data['route_list_number']}\n"
+            f"Фактическое количество: {actual_quantity}\n"
+            f"Осталось выполнить: {sum(updated_sizes_dict.values())}\n"
+            f"Расход ткани: {data['fabric_used']} м\n"
+            f"Участники: {data['participants']}\n"
+            f"Сводка размеров (фактически):\n"
+        )
+        for size, qty in sorted(data['actual_sizes_dict'].items()):
+            stacks = data['stacks_dict'].get(size, 0)
+            admin_message += f"  {size}: {qty} (стопок: {stacks})\n"
+
+        try:
+            await bot.send_message(admin_id, admin_message)
+        except Exception as e:
+            logger.error(f"Ошибка уведомления администратора: {e}")
+
+        keyboard = [
+            [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
+        ]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+
+        await bot.edit_message_text(
+            f"✅ Заявка {request_id} частично завершена! Осталось выполнить: {sum(updated_sizes_dict.values())}",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=reply_markup
+        )
+
+        # Очистка данных
+        del user_data[user_id]['requests'][request_id]
+        if user_data[user_id].get('current_request_id') == request_id:
+            user_data[user_id].pop('current_request_id', None)
+        user_states.pop(user_id, None)
+
+    except Exception as e:
+        logger.error(f"Ошибка частичного завершения заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка при частичном завершении заявки.", call.message.chat.id, call.message.message_id)
+async def start_cutting_request(call):
+    user_id = call.from_user.id
+    logger.info(f"Попытка создания новой заявки на раскрой пользователем {user_id} в {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    if not is_authorized(user_id):
+        logger.warning(f"Пользователь {user_id} не авторизован")
+        await bot.answer_callback_query(call.id, "❌ Вы не авторизованы для создания заявок.", show_alert=True)
+        return
+
+    keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
+    reply_markup = types.InlineKeyboardMarkup(keyboard)
+    await bot.send_message(call.message.chat.id, "Введите название изделия:", reply_markup=reply_markup)
+    if user_id not in user_data:
+        user_data[user_id] = {}
+    user_states[user_id] = PRODUCT_NAME
+
 async def back_to_cutter(call):
     role = get_user_role(call.from_user.id)
     keyboard = [
@@ -424,34 +1219,25 @@ async def view_requests(call):
         return
 
     try:
-        expected_headers = [
-            "ID заявки", "Дата создания", "Название изделия", "Цвет ткани",
-            "Количество", "Статус", "ID администратора", "Имя администратора",
-            "ID раскройщика", "Имя раскройщика", "Фактическое количество",
-            "Количество стопок", "Расход ткани", "Участники раскроя", "Номер маршрутного листа", "Расход на единицу",
-            "Тип размеров", "Детали размеров", "Детали размеров (фактические)"
-        ]
-        current_headers = cutting_requests_sheet.row_values(1)
-        logger.info(f"Текущие заголовки в CuttingRequests: {current_headers}")
         requests = cutting_requests_sheet.get_all_records()
-        new_requests = [r for r in requests if r.get("Статус") == "Новая"]
+        available_requests = [r for r in requests if r.get("Статус") in ["Новая", "В работе"] and (r.get("Статус") == "Новая" or str(r.get("ID раскройщика")) == str(user_id))]
 
-        if not new_requests:
-            await bot.answer_callback_query(call.id, "Нет новых заявок на раскрой.", show_alert=True)
-            await bot.edit_message_text("Нет новых заявок на раскрой.", call.message.chat.id, call.message.message_id)
+        if not available_requests:
+            await bot.answer_callback_query(call.id, "Нет доступных заявок.", show_alert=True)
+            await bot.edit_message_text("Нет доступных заявок.", call.message.chat.id, call.message.message_id)
             return
 
         keyboard = []
-        for req in new_requests:
+        for req in available_requests:
             req_id = req.get("ID заявки", "Unknown")
             product_name = req.get("Название изделия", "Unknown")
             quantity = req.get("Количество", "Unknown")
             color = req.get("Цвет ткани", "Unknown")
+            status = req.get("Статус")
+            button_text = f"{product_name} (Цвет: {color}, Кол-во: {quantity}) - {status}"
+            callback = f"accept_{req_id}" if status == "Новая" else f"continue_request_{req_id}"
             keyboard.append([
-                types.InlineKeyboardButton(
-                    text=f"{product_name} (Цвет: {color}, Кол-во: {quantity})",
-                    callback_data=f"accept_{req_id}"
-                )
+                types.InlineKeyboardButton(text=button_text, callback_data=callback)
             ])
 
         keyboard.append([types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_cutter")])
@@ -465,6 +1251,88 @@ async def view_requests(call):
     except Exception as e:
         logger.error(f"Ошибка при получении заявок: {e}")
         await bot.answer_callback_query(call.id, "Произошла ошибка при загрузке заявок.", show_alert=True)
+
+
+async def continue_request(call, request_id: str):
+    user_id = call.from_user.id
+
+    try:
+        requests = cutting_requests_sheet.get_all_records()
+        row_idx = None
+        for idx, req in enumerate(requests, 2):
+            if req.get("ID заявки") == request_id:
+                row_idx = idx
+                break
+
+        if not row_idx:
+            await bot.answer_callback_query(call.id, "Заявка не найдена.", show_alert=True)
+            return
+
+        current_status = cutting_requests_sheet.cell(row_idx, 6).value
+        if current_status != "В работе":
+            await bot.answer_callback_query(call.id, "Эта заявка не в работе.", show_alert=True)
+            return
+
+        cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
+        if str(cutter_id) != str(user_id):
+            await bot.answer_callback_query(call.id, "Эта заявка назначена другому пользователю.", show_alert=True)
+            return
+
+        sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
+        sizes_dict = json.loads(sizes_json) if sizes_json else {}
+
+        if not sizes_dict:
+            await bot.edit_message_text(
+                "❌ В заявке не указаны размеры. Свяжитесь с администратором.",
+                call.message.chat.id, call.message.message_id
+            )
+            return
+
+        sizes_text = "\nОставшиеся размеры и количества:\n"
+        for size, qty in sorted(sizes_dict.items()):
+            sizes_text += f"  {size}: {qty}\n"
+
+        if user_id not in user_data:
+            user_data[user_id] = {}
+        if 'requests' not in user_data[user_id]:
+            user_data[user_id]['requests'] = {}
+        user_data[user_id]['requests'][request_id] = {
+            'row_idx': row_idx,
+            'ordered_sizes_dict': sizes_dict,
+            'actual_sizes_dict': {},
+            'stacks_dict': {},
+            'actual_selected_sizes': sorted(sizes_dict.keys()),
+            'actual_current_index': 0
+        }
+        user_data[user_id]['current_request_id'] = request_id
+
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
+        confirmation_text = (
+            f"Продолжение работы над заявкой {request_id}:\n\n"
+            f"Изделие: {product_name}\n"
+            f"Цвет ткани: {color}\n"
+            f"Оставшиеся:\n{sizes_text}"
+            f"\nПродолжить с вводом фактических данных?"
+        )
+
+        keyboard = [
+            [types.InlineKeyboardButton("✔ Продолжить", callback_data=f"proceed_completion_{request_id}")],
+            [types.InlineKeyboardButton("Завершить без данных", callback_data=f"complete_without_data_{request_id}")],
+            [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
+        ]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.edit_message_text(
+            confirmation_text,
+            call.message.chat.id, call.message.message_id,
+            reply_markup=reply_markup
+        )
+        user_states[user_id] = CONFIRM_COMPLETION
+
+    except Exception as e:
+        logger.error(f"Ошибка при продолжении заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка при продолжении заявки.", call.message.chat.id,
+                                    call.message.message_id)
 
 async def accept_request(call, request_id: str):
     user_id = call.from_user.id
@@ -500,14 +1368,20 @@ async def accept_request(call, request_id: str):
         cutting_requests_sheet.update_cell(row_idx, 9, cutter_id)
         cutting_requests_sheet.update_cell(row_idx, 10, cutter_name)
 
-        # Извлекаем данные о размерах
         sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
         sizes_dict = json.loads(sizes_json) if sizes_json else {}
+
+        if not sizes_dict:
+            await bot.edit_message_text(
+                "❌ В заявке не указаны размеры. Свяжитесь с администратором.",
+                call.message.chat.id, call.message.message_id
+            )
+            return
+
         sizes_text = "\nРазмеры и количества:\n"
         for size, qty in sorted(sizes_dict.items()):
             sizes_text += f"  {size}: {qty}\n"
 
-        # Инициализируем данные заявки в user_data
         if user_id not in user_data:
             user_data[user_id] = {}
         if 'requests' not in user_data[user_id]:
@@ -515,95 +1389,44 @@ async def accept_request(call, request_id: str):
         user_data[user_id]['requests'][request_id] = {
             'row_idx': row_idx,
             'ordered_sizes_dict': sizes_dict,
-            'product_name': cutting_requests_sheet.cell(row_idx, 3).value,
-            'color': cutting_requests_sheet.cell(row_idx, 4).value,
-            'total_quantity': cutting_requests_sheet.cell(row_idx, 5).value
+            'actual_sizes_dict': {},
+            'stacks_dict': {},
+            'actual_selected_sizes': sorted(sizes_dict.keys()),
+            'actual_current_index': 0
         }
+        user_data[user_id]['current_request_id'] = request_id
+
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
+        confirmation_text = (
+            f"Заявка {request_id} принята!\n\n"
+            f"Изделие: {product_name}\n"
+            f"Цвет ткани: {color}\n"
+            f"Заказано:\n{sizes_text}"
+            f"\nПродолжить с вводом фактических данных?"
+        )
 
         keyboard = [
-            [types.InlineKeyboardButton("✅ Завершить заявку", callback_data=f"complete_{request_id}")]
+            [types.InlineKeyboardButton("✔ Продолжить", callback_data=f"proceed_completion_{request_id}")],
+            [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
         ]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
-
         await bot.edit_message_text(
-            text=f"✅ Вы приняли заявку:\n\n"
-                 f"ID: {request_id}\n"
-                 f"Изделие: {cutting_requests_sheet.cell(row_idx, 3).value}\n"
-                 f"Цвет: {cutting_requests_sheet.cell(row_idx, 4).value}\n"
-                 f"Количество: {cutting_requests_sheet.cell(row_idx, 5).value}\n"
-                 f"{sizes_text}\n"
-                 "После выполнения нажмите кнопку ниже:",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
+            confirmation_text,
+            call.message.chat.id, call.message.message_id,
             reply_markup=reply_markup
         )
-
-        admin_id = cutting_requests_sheet.cell(row_idx, 7).value
-        try:
-            await bot.send_message(
-                admin_id,
-                f"✅ {cutter_name} принял заявку {request_id}"
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при уведомлении администратора: {e}")
+        user_states[user_id] = CONFIRM_COMPLETION
 
     except Exception as e:
-        logger.error(f"Ошибка при принятии заявки: {e}")
-        await bot.answer_callback_query(call.id, "Произошла ошибка.", show_alert=True)
-
-async def complete_request(call):
-    request_id = call.data.replace("complete_", "")
-    user_id = call.from_user.id
-
-    try:
-        # Проверяем, есть ли данные заявки в user_data
-        if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
-            await bot.send_message(call.message.chat.id, "❌ Данные заявки не найдены. Попробуйте принять заявку заново.")
-            return
-
-        request_data = user_data[user_id]['requests'][request_id]
-        row_idx = request_data['row_idx']
-
-        current_status = cutting_requests_sheet.cell(row_idx, 6).value
-        if current_status == "Выполнена":
-            await bot.edit_message_text("❌ Эта заявка уже выполнена.", call.message.chat.id, call.message.message_id)
-            return
-
-        cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
-        if str(cutter_id) != str(user_id):
-            await bot.edit_message_text("❌ Вы не можете завершить эту заявку.", call.message.chat.id, call.message.message_id)
-            return
-
-        # Инициализируем данные для завершения заявки
-        if 'current_request_id' not in user_data[user_id]:
-            user_data[user_id]['current_request_id'] = request_id
-        user_data[user_id]['requests'][request_id]['actual_sizes_dict'] = {}
-        user_data[user_id]['requests'][request_id]['stacks_dict'] = {}
-        user_data[user_id]['requests'][request_id]['actual_selected_sizes'] = sorted(request_data['ordered_sizes_dict'].keys())
-        user_data[user_id]['requests'][request_id]['actual_current_index'] = 0
-
-        if not user_data[user_id]['requests'][request_id]['actual_selected_sizes']:
-            await bot.send_message(call.message.chat.id, "❌ В заявке нет указанных размеров. Свяжитесь с администратором.")
-            return
-
-        first_size = user_data[user_id]['requests'][request_id]['actual_selected_sizes'][0]
-        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
-        reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(
-            call.message.chat.id,
-            f"Заполните фактические данные по заявке {request_id}:\n\nВведите фактическое количество для размера {first_size}:",
-            reply_markup=reply_markup
-        )
-        user_states[user_id] = ACTUAL_SIZES_QUANTITY
-
-    except Exception as e:
-        logger.error(f"Ошибка при проверке заявки {request_id}: {e}")
-        await bot.edit_message_text("❌ Произошла ошибка.", call.message.chat.id, call.message.message_id)
+        logger.error(f"Ошибка при принятии заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка при принятии заявки.", call.message.chat.id,
+                                    call.message.message_id)
 
 async def process_actual_sizes_quantity(message):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
-    if not request_id or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+    if not request_id or request_id not in user_data[user_id]['requests']:
         await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
         return
 
@@ -620,19 +1443,28 @@ async def process_actual_sizes_quantity(message):
     selected_sizes = user_data[user_id]['requests'][request_id]['actual_selected_sizes']
     user_data[user_id]['requests'][request_id]['actual_sizes_dict'][selected_sizes[current_index]] = quantity
 
-    keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
-    reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.send_message(
-        message.chat.id,
-        f"Введите количество стопок для размера {selected_sizes[current_index]}:",
-        reply_markup=reply_markup
-    )
-    user_states[user_id] = SIZE_STACKS
+    current_index += 1
+    user_data[user_id]['requests'][request_id]['actual_current_index'] = current_index
+
+    if current_index < len(selected_sizes):
+        next_size = selected_sizes[current_index]
+        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(message.chat.id, f"Введите фактическое количество для размера {next_size}:", reply_markup=reply_markup)
+        return
+    else:
+        user_data[user_id]['requests'][request_id]['actual_quantity'] = sum(user_data[user_id]['requests'][request_id]['actual_sizes_dict'].values())
+        user_data[user_id]['requests'][request_id]['actual_current_index'] = 0
+        first_size = selected_sizes[0]
+        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(message.chat.id, f"Введите количество стопок для размера {first_size}:", reply_markup=reply_markup)
+        user_states[user_id] = SIZE_STACKS
 
 async def process_size_stacks(message):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
-    if not request_id or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+    if not request_id or request_id not in user_data[user_id]['requests']:
         await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
         return
 
@@ -656,63 +1488,49 @@ async def process_size_stacks(message):
         next_size = selected_sizes[current_index]
         keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(
-            message.chat.id,
-            f"Введите фактическое количество для размера {next_size}:",
-            reply_markup=reply_markup
-        )
-        user_states[user_id] = ACTUAL_SIZES_QUANTITY
+        await bot.send_message(message.chat.id, f"Введите количество стопок для размера {next_size}:", reply_markup=reply_markup)
+        return
     else:
-        total_quantity = sum(user_data[user_id]['requests'][request_id]['actual_sizes_dict'].values())
-        if total_quantity == 0:
-            await bot.send_message(message.chat.id, "❌ Фактическое количество не может быть нулевым. Начните заново:")
-            user_states[user_id] = ACTUAL_SIZES_QUANTITY
-            return
-
-        user_data[user_id]['requests'][request_id]['actual_quantity'] = total_quantity
-
         keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(message.chat.id, "Введите расход ткани (в метрах):", reply_markup=reply_markup)
+        await bot.send_message(message.chat.id, "Введите общий расход ткани (в метрах):", reply_markup=reply_markup)
         user_states[user_id] = FABRIC_USED
 
 async def process_fabric_used(message):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
-    if not request_id or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+    if not request_id or request_id not in user_data[user_id]['requests']:
         await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
         return
 
     try:
-        fabric_used = float(message.text)
-        if fabric_used <= 0:
-            await bot.send_message(message.chat.id, "❌ Расход должен быть положительным числом. Попробуйте снова:")
+        fabric_used = float(message.text.strip())
+        if fabric_used < 0:
+            await bot.send_message(message.chat.id, "❌ Расход ткани не может быть отрицательным. Попробуйте снова:")
             return
     except ValueError:
         await bot.send_message(message.chat.id, "❌ Пожалуйста, введите число. Попробуйте снова:")
         return
 
     user_data[user_id]['requests'][request_id]['fabric_used'] = fabric_used
-
     keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
     reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.send_message(message.chat.id, "Введите участников раскроя (через запятую):", reply_markup=reply_markup)
+    await bot.send_message(message.chat.id, "Введите участников раскроя:", reply_markup=reply_markup)
     user_states[user_id] = PARTICIPANTS
 
 async def process_participants(message):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
-    if not request_id or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+    if not request_id or request_id not in user_data[user_id]['requests']:
         await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
         return
 
     participants = message.text.strip()
     if not participants:
-        await bot.send_message(message.chat.id, "❌ Пожалуйста, введите хотя бы одного участника.")
+        await bot.send_message(message.chat.id, "❌ Список участников не может быть пустым. Попробуйте снова:")
         return
 
     user_data[user_id]['requests'][request_id]['participants'] = participants
-
     keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
     reply_markup = types.InlineKeyboardMarkup(keyboard)
     await bot.send_message(message.chat.id, "Введите номер маршрутного листа:", reply_markup=reply_markup)
@@ -721,7 +1539,7 @@ async def process_participants(message):
 async def process_comment(message):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
-    if not request_id or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+    if not request_id or request_id not in user_data[user_id]['requests']:
         await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
         return
 
@@ -731,77 +1549,37 @@ async def process_comment(message):
         return
 
     user_data[user_id]['requests'][request_id]['route_list_number'] = route_list_number
-    await show_confirmation(message)
-
-async def show_confirmation(message_or_call):
-    if hasattr(message_or_call, 'text'):
-        message = message_or_call
-        user_id = message.from_user.id
-        chat_id = message.chat.id
-    else:
-        call = message_or_call
-        user_id = call.from_user.id
-        chat_id = call.message.chat.id
-
-    request_id = user_data[user_id].get('current_request_id')
-    if not request_id or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
-        await bot.send_message(chat_id, "❌ Ошибка: данные заявки не найдены.")
-        return
 
     data = user_data[user_id]['requests'][request_id]
-    confirmation_text = (
-        "✅ Подтвердите завершение заявки:\n\n"
-        f"ID заявки: {request_id}\n"
-        f"Фактическое количество: {data['actual_quantity']}\n"
-        f"Фактические размеры и стопки:\n"
-    )
+    confirmation_text = "✅ Подтвердите данные завершения заявки:\n\n"
+    confirmation_text += f"Фактическое количество: {data['actual_quantity']}\n"
+    confirmation_text += "Фактические размеры и количества:\n"
     for size, qty in sorted(data['actual_sizes_dict'].items()):
         stacks = data['stacks_dict'].get(size, 0)
         confirmation_text += f"  {size}: {qty} (стопок: {stacks})\n"
-    confirmation_text += (
-        f"Расход ткани: {data['fabric_used']} м\n"
-        f"Участники: {data['participants']}\n"
-        f"Номер маршрутного листа: {data.get('route_list_number', 'нет')}"
-    )
+    confirmation_text += f"Расход ткани: {data['fabric_used']} м\n"
+    confirmation_text += f"Участники: {data['participants']}\n"
+    confirmation_text += f"Номер маршрутного листа: {route_list_number}"
 
     keyboard = [
         [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"confirmcomplete_{request_id}")],
-        [types.InlineKeyboardButton("✏ Исправить", callback_data=f"edit_completion_{request_id}")]
+        [types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_completion_{request_id}")],
+        [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
     ]
     reply_markup = types.InlineKeyboardMarkup(keyboard)
-
-    await bot.send_message(chat_id, confirmation_text, reply_markup=reply_markup)
+    await bot.send_message(message.chat.id, confirmation_text, reply_markup=reply_markup)
     user_states[user_id] = CONFIRM_COMPLETION
 
-async def confirmcompletion(call):
-    request_id = call.data.replace("confirmcomplete_", "")
+async def complete_request(call):
+    request_id = call.data.replace("complete_", "")
     user_id = call.from_user.id
 
     if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
         await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
         return
 
-    data = user_data[user_id]['requests'][request_id]
-
     try:
-        expected_headers = [
-            "ID заявки", "Дата создания", "Название изделия", "Цвет ткани",
-            "Количество", "Статус", "ID администратора", "Имя администратора",
-            "ID раскройщика", "Имя раскройщика", "Фактическое количество",
-            "Количество стопок", "Расход ткани", "Участники раскроя", "Номер маршрутного листа", "Расход на единицу",
-            "Тип размеров", "Детали размеров", "Детали размеров (фактические)"
-        ]
-        requests = cutting_requests_sheet.get_all_records()
-        row_idx = None
-        for idx, req in enumerate(requests, 2):
-            if req.get("ID заявки") == request_id:
-                row_idx = idx
-                break
-
-        if not row_idx:
-            await bot.edit_message_text("❌ Заявка не найдена", call.message.chat.id, call.message.message_id)
-            return
-
+        row_idx = user_data[user_id]['requests'][request_id]['row_idx']
         current_status = cutting_requests_sheet.cell(row_idx, 6).value
         if current_status == "Выполнена":
             await bot.edit_message_text("❌ Эта заявка уже выполнена.", call.message.chat.id, call.message.message_id)
@@ -814,106 +1592,33 @@ async def confirmcompletion(call):
 
         product_name = cutting_requests_sheet.cell(row_idx, 3).value
         color = cutting_requests_sheet.cell(row_idx, 4).value
-        actual_sizes_json = json.dumps(data['actual_sizes_dict'])
-        total_stacks = sum(data['stacks_dict'].values())
-        updates = [
-            (row_idx, 6, "Выполнена"),
-            (row_idx, 11, data['actual_quantity']),
-            (row_idx, 12, total_stacks),
-            (row_idx, 13, data['fabric_used']),
-            (row_idx, 14, data['participants']),
-            (row_idx, 15, data['route_list_number']),
-            (row_idx, 16, f'=M{row_idx}/K{row_idx}'),
-            (row_idx, 19, actual_sizes_json)
-        ]
-
-        for row, col, value in updates:
-            cutting_requests_sheet.update_cell(row, col, value)
-
-        fabric_per_unit = data['fabric_used'] / data['actual_quantity'] if data['actual_quantity'] > 0 else 0
-
-        spreadsheet = sheets_data["spreadsheet"]
-        try:
-            route_list_number = data['route_list_number']
-            new_sheet = spreadsheet.add_worksheet(title=route_list_number+color, rows=50, cols=9)
-            new_sheet.append_row([
-                "Наименование изделия", "Размер", "Количество (заказано)", "Фактическое количество",
-                "Количество стопок", "Цвет ткани", "Расход ткани (м)", "Расход на единицу (м)", "Участники"
-            ])
-            new_sheet.format("A1:I1", {
-                "textFormat": {"bold": True},
-                "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}
-            })
-            new_sheet.format("A2:I100", {
-                "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
-                "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}}
-            })
-            new_sheet.format("D2:D100", {
-                "backgroundColor": {"red": 0.8, "green": 1.0, "blue": 0.8}
-            })
-            row = 2
-            for size in sorted(data['ordered_sizes_dict'].keys()):
-                ordered_qty = data['ordered_sizes_dict'].get(size, 0)
-                actual_qty = data['actual_sizes_dict'].get(size, 0)
-                stacks = data['stacks_dict'].get(size, 0)
-                new_sheet.append_row([
-                    product_name, size, ordered_qty, actual_qty, stacks,
-                    color, data['fabric_used'], round(fabric_per_unit, 2), data['participants']
-                ])
-                row += 1
-            new_sheet.append_row(["Номер маршрутного листа", route_list_number, "", "", "", "", "", "", ""])
-            logger.info(f"Создан лист {route_list_number}")
-        except Exception as e:
-            route_list_number = data['route_list_number']
-            logger.error(f"Ошибка создания листа {route_list_number}: {e}")
-
-        admin_id = cutting_requests_sheet.cell(row_idx, 7).value
-        admin_message = (
-            f"✅ Заявка {request_id} выполнена!\n"
-            f"Раскройщик: {call.from_user.full_name}\n"
-            f"Изделие: {product_name}\n"
-            f"Цвет ткани: {color}\n"
-            f"Номер маршрутного листа: {data['route_list_number']}\n"
-            f"Фактическое количество: {data['actual_quantity']}\n"
-            f"Расход ткани: {data['fabric_used']} м\n"
-            f"Расход на единицу: {round(fabric_per_unit, 2)} м\n"
-            f"Участники: {data['participants']}\n"
-            f"Сводка размеров:\n"
-            f"Заказано:\n"
-        )
-        for size, qty in sorted(data['ordered_sizes_dict'].items()):
-            admin_message += f"  {size}: {qty}\n"
-        admin_message += f"Фактически (с количеством стопок):\n"
-        for size, qty in sorted(data['actual_sizes_dict'].items()):
-            stacks = data['stacks_dict'].get(size, 0)
-            admin_message += f"  {size}: {qty} (стопок: {stacks})\n"
-
-        try:
-            await bot.send_message(admin_id, admin_message)
-        except Exception as e:
-            logger.error(f"Ошибка уведомления администратора: {e}")
+        sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
+        ordered_sizes_dict = json.loads(sizes_json) if sizes_json else {}
 
         keyboard = [
-            [types.InlineKeyboardButton("📋 Посмотреть другие заявки", callback_data="view_requests")]
+            [types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_completion_{request_id}")],
+            [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
         ]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
-
         await bot.edit_message_text(
-            "✅ Заявка успешно завершена и сохранена!",
+            f"Завершение заявки {request_id}:\n\nВведите фактическое количество для размера {sorted(ordered_sizes_dict.keys())[0]}:",
             call.message.chat.id, call.message.message_id,
             reply_markup=reply_markup
         )
-
-        # Очищаем данные только для текущей заявки
-        if 'requests' in user_data[user_id] and request_id in user_data[user_id]['requests']:
-            del user_data[user_id]['requests'][request_id]
-        if user_data[user_id].get('current_request_id') == request_id:
-            user_data[user_id].pop('current_request_id', None)
-        user_states.pop(user_id, None)
+        user_data[user_id]['requests'][request_id] = {
+            'row_idx': row_idx,
+            'ordered_sizes_dict': ordered_sizes_dict,
+            'actual_sizes_dict': {},
+            'stacks_dict': {},
+            'actual_selected_sizes': sorted(ordered_sizes_dict.keys()),
+            'actual_current_index': 0
+        }
+        user_data[user_id]['current_request_id'] = request_id
+        user_states[user_id] = ACTUAL_SIZES_QUANTITY
 
     except Exception as e:
-        logger.error(f"Ошибка завершения заявки {request_id}: {e}")
-        await bot.edit_message_text("❌ Произошла ошибка при сохранении данных", call.message.chat.id, call.message.message_id)
+        logger.error(f"Ошибка при проверке заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Произошла ошибка.", call.message.chat.id, call.message.message_id)
 
 async def edit_completion(call):
     request_id = call.data.replace("edit_completion_", "")
@@ -967,7 +1672,6 @@ async def cancel_completion(call):
         await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
         return
 
-    # Очищаем данные только для текущей заявки
     if 'requests' in user_data[user_id] and request_id in user_data[user_id]['requests']:
         del user_data[user_id]['requests'][request_id]
     if user_data[user_id].get('current_request_id') == request_id:
@@ -985,260 +1689,30 @@ async def cancel_completion(call):
         reply_markup=reply_markup
     )
 
-async def start_cutting_request(call):
+async def cancel_request(call):
     user_id = call.from_user.id
-    logger.info(f"Попытка создания новой заявки на раскрой пользователем {user_id} в {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    user_data.pop(user_id, None)
+    user_states.pop(user_id, None)
 
     if not is_authorized(user_id):
-        logger.warning(f"Пользователь {user_id} не авторизован")
-        await bot.answer_callback_query(call.id, "❌ Вы не авторизованы для создания заявок.", show_alert=True)
+        await bot.edit_message_text("❌ Доступ запрещен.", call.message.chat.id, call.message.message_id)
         return
 
-    keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
-    reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.send_message(call.message.chat.id, "Введите название изделия:", reply_markup=reply_markup)
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    user_states[user_id] = PRODUCT_NAME
-
-async def process_product_name(message):
-    user_id = message.from_user.id
-    product_name = message.text.strip()
-
-    if not product_name:
-        await bot.send_message(message.chat.id, "❌ Название изделия не может быть пустым. Попробуйте снова:")
-        return
-
-    user_data[user_id]['product_name'] = product_name
-
-    # Получаем цвета из листа Products
-    try:
-        products = products_sheet.get_all_records()
-        colors_list = []
-        for prod in products:
-            if prod.get("ProductName", "").strip().lower() == product_name.lower():
-                colors_str = prod.get("Colors", "")
-                if colors_str:
-                    colors_list = [c.strip() for c in colors_str.split(",")]
-                break
-
-        if colors_list:
-            # Показываем кнопки для выбора цвета
-            keyboard = []
-            row = []
-            for color in colors_list:
-                row.append(types.InlineKeyboardButton(color, callback_data=f"color_{color}"))
-                if len(row) == 3:  # По 3 в ряд для удобства
-                    keyboard.append(row)
-                    row = []
-            if row:
-                keyboard.append(row)
-            keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
-            reply_markup = types.InlineKeyboardMarkup(keyboard)
-            await bot.send_message(message.chat.id, f"Выберите цвет для изделия '{product_name}':", reply_markup=reply_markup)
-            user_states[user_id] = COLOR_SELECTION
-        else:
-            # Если нет цветов, ввод вручную (как раньше)
-            keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
-            reply_markup = types.InlineKeyboardMarkup(keyboard)
-            await bot.send_message(message.chat.id, "Цвета не найдены для этого изделия. Введите цвет ткани вручную:", reply_markup=reply_markup)
-            user_states[user_id] = COLOR
-    except Exception as e:
-        logger.error(f"Ошибка при получении цветов для продукта {product_name}: {e}")
-        await bot.send_message(message.chat.id, "❌ Ошибка при загрузке цветов. Введите цвет вручную:")
-        user_states[user_id] = COLOR
-
-async def process_color(message):
-    user_id = message.from_user.id
-    color = message.text.strip()
-
-    if not color:
-        await bot.send_message(message.chat.id, "❌ Цвет ткани не может быть пустым. Попробуйте снова:")
-        return
-
-    user_data[user_id]['color'] = color
-
-    keyboard = [
-        [types.InlineKeyboardButton("Взрослые (34-64)", callback_data="sizes_adult")],
-        [types.InlineKeyboardButton("Детские (122-158)", callback_data="sizes_child")],
-        [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
-    ]
-    reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.send_message(message.chat.id, "Выберите тип размеров:", reply_markup=reply_markup)
-    user_states[user_id] = SIZES_TYPE
-
-async def process_sizes_type(call):
-    sizes_type = "adult" if call.data == "sizes_adult" else "child"
-    user_id = call.from_user.id
-    user_data[user_id]['sizes_type'] = sizes_type
-    user_data[user_id]['selected_sizes'] = []
-    user_data[user_id]['sizes_dict'] = {}
-
-    start, end, step = (34, 64, 2) if sizes_type == "adult" else (122, 158, 6)
-    valid_sizes = list(range(start, end + 1, step))
-
+    role = get_user_role(user_id)
     keyboard = []
-    row = []
-    for size in valid_sizes:
-        row.append(types.InlineKeyboardButton(str(size), callback_data=f"size_{size}"))
-        if len(row) == 5:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="sizes_done")])
-    keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
+
+    if role == "Admin":
+        keyboard = [
+            [types.InlineKeyboardButton("👥 Просмотр заявок на роли", callback_data="requests")],
+            [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")]
+        ]
+    elif role in ["Cutter", "Seamstress"]:
+        keyboard = [
+            [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
+        ]
 
     reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.send_message(
-        call.message.chat.id,
-        f"Выберите размеры (нажмите на нужные размеры, затем 'Готово'):",
-        reply_markup=reply_markup
-    )
-    user_states[user_id] = SELECT_SIZES
-
-async def select_sizes(call):
-    user_id = call.from_user.id
-    callback_data = call.data
-
-    if callback_data == "sizes_done":
-        if not user_data[user_id].get('selected_sizes'):
-            await bot.send_message(call.message.chat.id, "❌ Выберите хотя бы один размер!")
-            return
-
-        user_data[user_id]['current_size_index'] = 0
-        size = user_data[user_id]['selected_sizes'][0]
-        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
-        reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(call.message.chat.id, f"Введите количество для размера {size}:", reply_markup=reply_markup)
-        user_states[user_id] = SIZES_QUANTITY
-        return
-
-    elif callback_data.startswith("size_"):
-        size = int(callback_data.replace("size_", ""))
-        selected_sizes = user_data[user_id]['selected_sizes']
-        if size in selected_sizes:
-            selected_sizes.remove(size)
-            await bot.answer_callback_query(call.id, f"Размер {size} убран из выбора")
-        else:
-            selected_sizes.append(size)
-            await bot.answer_callback_query(call.id, f"Размер {size} добавлен")
-
-        sizes_type = user_data[user_id]['sizes_type']
-        start, end, step = (34, 64, 2) if sizes_type == "adult" else (122, 158, 6)
-        valid_sizes = list(range(start, end + 1, step))
-
-        keyboard = []
-        row = []
-        for size in valid_sizes:
-            text = f"{size} ✅" if size in selected_sizes else str(size)
-            row.append(types.InlineKeyboardButton(text, callback_data=f"size_{size}"))
-            if len(row) == 5:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-        keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="sizes_done")])
-        keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
-
-        reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
-
-async def process_sizes_quantity(message):
-    user_id = message.from_user.id
-    try:
-        quantity = int(message.text.strip())
-        if quantity < 0:
-            await bot.send_message(message.chat.id, "❌ Количество не может быть отрицательным. Попробуйте снова:")
-            return
-    except ValueError:
-        await bot.send_message(message.chat.id, "❌ Пожалуйста, введите число. Попробуйте снова:")
-        return
-
-    current_index = user_data[user_id]['current_size_index']
-    selected_sizes = user_data[user_id]['selected_sizes']
-    user_data[user_id]['sizes_dict'][selected_sizes[current_index]] = quantity
-
-    current_index += 1
-    user_data[user_id]['current_size_index'] = current_index
-
-    if current_index < len(selected_sizes):
-        next_size = selected_sizes[current_index]
-        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
-        reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(message.chat.id, f"Введите количество для размера {next_size}:", reply_markup=reply_markup)
-        return
-    else:
-        total_quantity = sum(user_data[user_id]['sizes_dict'].values())
-        if total_quantity == 0:
-            await bot.send_message(message.chat.id, "❌ Общее количество не может быть нулевым. Начните заново:")
-            await process_sizes_type(message)  # Note: message instead of call, may need adjustment
-            return
-
-        user_data[user_id]['quantity'] = total_quantity
-
-        confirmation_text = "✅ Подтвердите данные:\n\n"
-        confirmation_text += f"Изделие: {user_data[user_id]['product_name']}\n"
-        confirmation_text += f"Цвет: {user_data[user_id]['color']}\n"
-        confirmation_text += f"Тип размеров: {'Взрослые' if user_data[user_id]['sizes_type'] == 'adult' else 'Детские'}\n"
-        confirmation_text += "Размеры и количества:\n"
-        for size, qty in sorted(user_data[user_id]['sizes_dict'].items()):
-            confirmation_text += f"  {size}: {qty}\n"
-        confirmation_text += f"Общее количество: {total_quantity}"
-
-        keyboard = [
-            [types.InlineKeyboardButton("✔ Подтвердить", callback_data="confirm_sizes")],
-            [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
-        ]
-        reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(message.chat.id, confirmation_text, reply_markup=reply_markup)
-        user_states[user_id] = CONFIRM_SIZES
-
-async def confirm_sizes(call):
-    user_id = call.from_user.id
-
-    try:
-        data = user_data[user_id]
-        product_name = data.get('product_name', 'Не указано')
-        color = data.get('color', 'Не указан')
-        sizes_type = data.get('sizes_type')
-        sizes_dict = data.get('sizes_dict')
-        total_quantity = data.get('quantity')
-        sizes_type_ru = "Взрослые" if sizes_type == "adult" else "Детские"
-        sizes_json = json.dumps(sizes_dict)
-
-        request_id = f"CR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
-        admin_id = user_id
-        admin_name = call.from_user.full_name
-
-        cutting_requests_sheet.append_row([
-            request_id, created_at, product_name, color, total_quantity, "Новая",
-            admin_id, admin_name, "", "", "", "", "", "", "", "", sizes_type_ru, sizes_json, ""
-        ])
-
-        await notify_cutters(bot, request_id, created_at, product_name, sizes_dict)
-
-        keyboard = [[types.InlineKeyboardButton("➕ Создать новую заявку", callback_data="new_cutting_request")]]
-        reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.send_message(
-            call.message.chat.id,
-            f"✅ Заявка на раскрой создана!\n"
-            f"ID: {request_id}\n"
-            f"Изделие: {product_name}\n"
-            f"Цвет: {color}\n"
-            f"Тип размеров: {sizes_type_ru}\n"
-            f"Общее количество: {total_quantity}\n"
-            f"Дата: {created_at}",
-            reply_markup=reply_markup
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка при создании заявки: {e}")
-        await bot.send_message(call.message.chat.id, f"❌ Произошла ошибка: {str(e)}. Попробуйте снова.")
-    finally:
-        user_data.pop(user_id, None)
-        user_states.pop(user_id, None)
+    await bot.edit_message_text("❌ Создание заявки отменено.", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
 
 async def notify_cutters(bot, request_id: str, created_at: str, product_name: str, sizes_dict: dict):
     try:
@@ -1268,50 +1742,11 @@ async def notify_cutters(bot, request_id: str, created_at: str, product_name: st
     except Exception as e:
         logger.error(f"Ошибка при получении списка пользователей: {e}")
 
-async def cancel_request(call):
-    user_id = call.from_user.id
-    user_data.pop(user_id, None)
-    user_states.pop(user_id, None)
-
-    if not is_authorized(user_id):
-        await bot.edit_message_text("❌ Доступ запрещен.", call.message.chat.id, call.message.message_id)
-        return
-
-    role = get_user_role(user_id)
-    keyboard = []
-
-    if role == "Admin":
-        keyboard = [
-            [types.InlineKeyboardButton("👥 Просмотр заявок на роли", callback_data="requests")],
-            [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")]
-        ]
-    elif role in ["Cutter", "Seamstress"]:
-        keyboard = [
-            [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
-        ]
-
-    reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.edit_message_text("❌ Создание заявки отменено.", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
-async def select_color(call):
-    user_id = call.from_user.id
-    color = call.data.replace("color_", "")
-
-    user_data[user_id]['color'] = color
-
-    keyboard = [
-        [types.InlineKeyboardButton("Взрослые (34-64)", callback_data="sizes_adult")],
-        [types.InlineKeyboardButton("Детские (122-158)", callback_data="sizes_child")],
-        [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
-    ]
-    reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.edit_message_text(f"Цвет '{color}' выбран. Выберите тип размеров:", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
-    user_states[user_id] = SIZES_TYPE
 async def start_callback(call):
     user_id = call.from_user.id
     keyboard = []
     if is_authorized(user_id):
         role = get_user_role(user_id)
-
         if role == "Admin":
             keyboard = [
                 [types.InlineKeyboardButton("👥 Просмотр заявок на роли", callback_data="requests")],
