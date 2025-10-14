@@ -95,6 +95,7 @@ async def continue_request(bot, call, user_states, user_data, cutting_requests_s
             await bot.answer_callback_query(call.id, "Эта заявка не в работе.", show_alert=True)
             return
 
+
         cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
         if str(cutter_id) != str(user_id):
             await bot.answer_callback_query(call.id, "Эта заявка назначена другому пользователю.", show_alert=True)

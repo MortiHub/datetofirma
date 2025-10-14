@@ -49,7 +49,7 @@ async def callback_wrapper(call):
 
 @bot.message_handler(func=lambda message: True)
 async def text_wrapper(message):
-    await text_handler(bot, message, user_states, user_data, cutting_requests_sheet)
+    await text_handler(bot, message, user_states, user_data, cutting_requests_sheet, products_sheet)
 
 
 if __name__ == "__main__":

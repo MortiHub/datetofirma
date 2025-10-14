@@ -8,7 +8,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-async def handle_admin_callbacks(bot, call, user_states, user_data, users_sheet, requests_sheet, cutting_requests_sheet):
+async def handle_admin_callbacks(bot, call, user_states, user_data, users_sheet, requests_sheet, cutting_requests_sheet, products_sheet):
     callback_data = call.data
     user_id = call.from_user.id
 
@@ -115,9 +115,9 @@ async def handle_admin_callbacks(bot, call, user_states, user_data, users_sheet,
         await bot.edit_message_text("Главное меню администратора:", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
 
     elif callback_data == "new_cutting_request":
-        await start_cutting_request(bot, call, user_states, user_data, users_sheet)
+        await start_cutting_request(bot, call, user_states, user_data, users_sheet, products_sheet)
 
-async def start_cutting_request(bot, call, user_states, user_data, users_sheet):
+async def start_cutting_request(bot, call, user_states, user_data, users_sheet, products_sheet):
     user_id = call.from_user.id
     logger.info(f"Попытка создания новой заявки на раскрой пользователем {user_id}")
 

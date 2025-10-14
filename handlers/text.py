@@ -1,18 +1,19 @@
 from telebot import types
 
 from config import *
+from handlers.callback import notify_seamstresses
 from sheets.users import is_authorized, get_user_role
 import logging
 import json
 
 logger = logging.getLogger(__name__)
 
-async def text_handler(bot, message, user_states, user_data, cutting_requests_sheet):
+async def text_handler(bot, message, user_states, user_data, cutting_requests_sheet, products_sheet):
     user_id = message.from_user.id
     state = user_states.get(user_id, None)
 
     if state == PRODUCT_NAME:
-        await process_product_name(bot, message, user_states, user_data)
+        await process_product_name(bot, message, user_states, user_data, products_sheet)
     elif state == COLOR:
         await process_color(bot, message, user_states, user_data)
     elif state == SIZES_QUANTITY:
@@ -27,15 +28,27 @@ async def text_handler(bot, message, user_states, user_data, cutting_requests_sh
         await process_participants(bot, message, user_states, user_data)
     elif state == COMMENT:
         await process_comment(bot, message, user_states, user_data)
-    elif state == FINAL_SUM_INPUT:
-        await process_final_sum(bot, message, user_states, user_data, cutting_requests_sheet)
 
-async def process_product_name(bot, message, user_states, user_data):
+async def process_product_name(bot, message, user_states, user_data, products_sheet):
     user_id = message.from_user.id
     product_name = message.text.strip()
 
     if not product_name:
         await bot.send_message(message.chat.id, "❌ Название изделия не может быть пустым. Попробуйте снова:")
+        return
+
+    # Получаем доступные цвета для этого изделия из базы данных
+    products = products_sheet.get_all_records()
+    colors_list = []
+    for prod in products:
+        if prod.get("ProductName", "").strip().lower() == product_name.lower():
+            colors_str = prod.get("Colors", "")
+            if colors_str:
+                colors_list = [c.strip() for c in colors_str.split(",")]
+            break
+
+    if not colors_list:
+        await bot.send_message(message.chat.id, "❌ Для этого изделия нет доступных цветов. Попробуйте другое изделие:")
         return
 
     user_data[user_id] = {
@@ -45,10 +58,22 @@ async def process_product_name(bot, message, user_states, user_data):
         'current_color_index': 0
     }
 
-    keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]]
+    # Создаем клавиатуру с кнопками цветов
+    keyboard = []
+    row = []
+    for color in colors_list:
+        row.append(types.InlineKeyboardButton(color, callback_data=f"color_{color}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="colors_done")])
+    keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
+
     reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.send_message(message.chat.id, "Введите цвет ткани вручную:", reply_markup=reply_markup)
-    user_states[user_id] = COLOR
+    await bot.send_message(message.chat.id, "Выберите цвета ткани:", reply_markup=reply_markup)
+    user_states[user_id] = SELECT_COLORS
 
 async def process_color(bot, message, user_states, user_data):
     user_id = message.from_user.id
@@ -251,6 +276,7 @@ async def process_fabric_used(bot, message, user_states, user_data):
     await bot.send_message(message.chat.id, "Введите участников (через запятую):", reply_markup=reply_markup)
     user_states[user_id] = PARTICIPANTS
 
+
 async def process_participants(bot, message, user_states, user_data):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
@@ -261,10 +287,39 @@ async def process_participants(bot, message, user_states, user_data):
     participants = message.text.strip()
     user_data[user_id]['requests'][request_id]['participants'] = participants
 
+    data = user_data[user_id]['requests'][request_id]
+
+    # Проверяем маршрутный лист
+    try:
+        from main import bot as global_bot
+        cutting_requests_sheet = global_bot._sheets_data["cutting_requests_sheet"]
+        row_idx = data['row_idx']
+        current_route_list = cutting_requests_sheet.cell(row_idx, 15).value
+
+        if current_route_list and current_route_list.strip():
+            user_data[user_id]['requests'][request_id]['route_list_number'] = current_route_list.strip()
+
+            # ВАЖНО: Для partial закрытия - сразу подтверждение (финальной суммы нет)
+            confirmation_text = await generate_partial_confirmation(data, current_route_list.strip())
+            keyboard = [
+                [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"partial_complete_{request_id}")],
+                [types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_completion_{request_id}")],
+                [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
+            ]
+            reply_markup = types.InlineKeyboardMarkup(keyboard)
+            await bot.send_message(message.chat.id, confirmation_text, reply_markup=reply_markup)
+            user_states[user_id] = CONFIRM_COMPLETION
+            return
+
+    except Exception as e:
+        logger.error(f"Ошибка при проверке маршрутного листа: {e}")
+
+    # Если маршрутного листа нет, запрашиваем его
     keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
     reply_markup = types.InlineKeyboardMarkup(keyboard)
     await bot.send_message(message.chat.id, "Введите номер маршрутного листа:", reply_markup=reply_markup)
     user_states[user_id] = COMMENT
+
 
 async def process_comment(bot, message, user_states, user_data):
     user_id = message.from_user.id
@@ -279,20 +334,12 @@ async def process_comment(bot, message, user_states, user_data):
         return
 
     user_data[user_id]['requests'][request_id]['route_list_number'] = route_list_number
-
     data = user_data[user_id]['requests'][request_id]
-    confirmation_text = "✅ Подтвердите данные завершения заявки:\n\n"
-    confirmation_text += f"Фактическое количество: {data['actual_quantity']}\n"
-    confirmation_text += "Фактические размеры и количества:\n"
-    for size, qty in sorted(data['actual_sizes_dict'].items()):
-        stacks = data['stacks_dict'].get(size, 0)
-        confirmation_text += f"  {size}: {qty} (стопок: {stacks})\n"
-    confirmation_text += f"Расход ткани: {data['fabric_used']} м\n"
-    confirmation_text += f"Участники: {data['participants']}\n"
-    confirmation_text += f"Номер маршрутного листа: {route_list_number}"
 
+    # ВАЖНО: Только для partial закрытия (full больше не используется)
+    confirmation_text = await generate_partial_confirmation(data, route_list_number)
     keyboard = [
-        [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"confirmcomplete_{request_id}")],
+        [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"partial_complete_{request_id}")],
         [types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_completion_{request_id}")],
         [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
     ]
@@ -300,12 +347,81 @@ async def process_comment(bot, message, user_states, user_data):
     await bot.send_message(message.chat.id, confirmation_text, reply_markup=reply_markup)
     user_states[user_id] = CONFIRM_COMPLETION
 
+async def generate_partial_confirmation(data, route_list_number):
+    """Генерирует текст подтверждения для partial закрытия"""
+    text = "✅ Подтвердите частичное закрытие:\n\n"
+    text += f"Маршрутный лист: {route_list_number}\n"
+    text += "Фактические количества:\n"
+
+    for size, qty in data.get('actual_sizes_dict', {}).items():
+        text += f"  Размер {size}: {qty} шт.\n"
+
+    text += f"\nСтопки: {sum(data.get('stacks_dict', {}).values())}"
+    text += f"\nРасход ткани: {data.get('fabric_used', 0)} м"
+    text += f"\nУчастники: {data.get('participants', '')}"
+
+    return text
+
+
+async def process_comment(bot, message, user_states, user_data):
+    user_id = message.from_user.id
+    request_id = user_data[user_id].get('current_request_id')
+    if not request_id or request_id not in user_data[user_id]['requests']:
+        await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
+        return
+
+    route_list_number = message.text.strip()
+    if not route_list_number:
+        await bot.send_message(message.chat.id, "❌ Номер маршрутного листа не может быть пустым. Попробуйте снова:")
+        return
+
+    # Сохраняем номер маршрутного листа
+    user_data[user_id]['requests'][request_id]['route_list_number'] = route_list_number
+
+    data = user_data[user_id]['requests'][request_id]
+
+    if data.get('completion_type') == 'partial':
+        # Для partial закрытия
+        confirmation_text = await generate_partial_confirmation(data, route_list_number)
+        keyboard = [
+            [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"partial_complete_{request_id}")],
+            [types.InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_completion_{request_id}")],
+            [types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]
+        ]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(message.chat.id, confirmation_text, reply_markup=reply_markup)
+        user_states[user_id] = CONFIRM_COMPLETION
+    else:
+        # Для full закрытия
+        keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
+        reply_markup = types.InlineKeyboardMarkup(keyboard)
+        await bot.send_message(message.chat.id, "Введите итоговую сумму выполненного:", reply_markup=reply_markup)
+
+
+async def generate_completion_confirmation(data, route_list_number, completion_type):
+    """Генерирует текст подтверждения"""
+    text = f"✅ Подтвердите {completion_type} закрытие:\n\n"
+    text += f"Маршрутный лист: {route_list_number}\n"
+
+    if completion_type == "partial":
+        text += "Фактические количества:\n"
+        for size, qty in data.get('actual_sizes_dict', {}).items():
+            text += f"  Размер {size}: {qty} шт.\n"
+    else:
+        text += f"Итоговая сумма: {data.get('final_sum', 0)}\n"
+
+    text += f"\nСтопки: {sum(data.get('stacks_dict', {}).values())}"
+    text += f"\nРасход ткани: {data.get('fabric_used', 0)} м"
+    text += f"\nУчастники: {data.get('participants', '')}"
+
+    return text
 async def process_final_sum(bot, message, user_states, user_data, cutting_requests_sheet):
     user_id = message.from_user.id
     request_id = user_data[user_id].get('current_request_id')
     if not request_id or request_id not in user_data[user_id]['requests']:
         await bot.send_message(message.chat.id, "❌ Ошибка: данные заявки не найдены.")
         return
+
     try:
         final_sum = int(message.text.strip())
         if final_sum < 0:
@@ -317,10 +433,8 @@ async def process_final_sum(bot, message, user_states, user_data, cutting_reques
 
     try:
         data = user_data[user_id]['requests'][request_id]
-        if data.get('completion_type') != 'full':
-            await bot.send_message(message.chat.id, "❌ Эта функция только для полного закрытия.")
-            return
 
+        # Проверяем, можно ли выполнять полное закрытие
         row_idx = data['row_idx']
         current_status = cutting_requests_sheet.cell(row_idx, 6).value
         if current_status == "Выполнена":
@@ -336,39 +450,64 @@ async def process_final_sum(bot, message, user_states, user_data, cutting_reques
         color = cutting_requests_sheet.cell(row_idx, 4).value
         admin_id = cutting_requests_sheet.cell(row_idx, 7).value
 
+        # Обновляем сумму и статус
         cutting_requests_sheet.update_cell(row_idx, 11, final_sum)
         cutting_requests_sheet.update_cell(row_idx, 6, "Выполнена")
 
+        # Получаем полные данные о заказе
+        ordered_sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
+        ordered_sizes_dict = json.loads(ordered_sizes_json) if ordered_sizes_json else {}
+
+        actual_sizes_json = cutting_requests_sheet.cell(row_idx, 19).value
+        actual_sizes_dict = json.loads(actual_sizes_json) if actual_sizes_json else {}
+
+        # Создаем/обновляем лист с полной информацией
         spreadsheet = cutting_requests_sheet._spreadsheet
+        route_list_number = data.get('route_list_number', 'unknown')
+        sheet_title = f"{route_list_number}-{color}"
+
         try:
-            route_list_number = data.get('route_list_number', 'unknown')
-            sheet_title = f"{route_list_number}-{color}"
+            new_sheet = spreadsheet.worksheet(sheet_title)
+        except:
             new_sheet = spreadsheet.add_worksheet(title=sheet_title, rows=50, cols=9)
             new_sheet.append_row([
                 "Наименование изделия", "Размер", "Количество (заказано)", "Фактическое количество",
                 "Количество стопок", "Цвет ткани", "Расход ткани (м)", "Расход на единицу (м)", "Участники"
             ])
-            new_sheet.format("A1:I1", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
-            new_sheet.format("A2:I100", {"backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}}})
-            new_sheet.format("D2:D100", {"backgroundColor": {"red": 0.8, "green": 1.0, "blue": 0.8}})
-            row_num = 2
-            fabric_per_unit = data.get('fabric_used', 0) / final_sum if final_sum > 0 else 0
-            new_sheet.append_row([
-                product_name, "Общее", sum(data['ordered_sizes_dict'].values()), final_sum, sum(data['stacks_dict'].values()),
-                color, data.get('fabric_used', 0), round(fabric_per_unit, 2), data.get('participants', '')
-            ])
-            row_num += 1
-            new_sheet.append_row(["Номер маршрутного листа", route_list_number, "", "", "", "", "", "", ""])
-            logger.info(f"Создан полный лист {sheet_title}")
-        except Exception as e:
-            logger.error(f"Ошибка создания листа: {e}")
+            new_sheet.format("A1:I1",
+                             {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
 
+        # Добавляем данные по каждому размеру
+        for size in sorted(set(list(ordered_sizes_dict.keys()) + list(actual_sizes_dict.keys()))):
+            ordered_qty = ordered_sizes_dict.get(size, 0)
+            actual_qty = actual_sizes_dict.get(size, 0)
+            stacks = data['stacks_dict'].get(size, 0) if data.get('stacks_dict') else 0
+
+            new_sheet.append_row([
+                product_name, size, ordered_qty, actual_qty, stacks,
+                color, data.get('fabric_used', 0),
+                round(data.get('fabric_used', 0) / final_sum, 2) if final_sum > 0 else 0,
+                data.get('participants', '')
+            ])
+
+        # Добавляем итоговую строку
+        fabric_per_unit = data.get('fabric_used', 0) / final_sum if final_sum > 0 else 0
+        new_sheet.append_row([
+            product_name, "ИТОГО", sum(ordered_sizes_dict.values()), final_sum,
+            sum(data.get('stacks_dict', {}).values()) if data.get('stacks_dict') else 0,
+            color, data.get('fabric_used', 0), round(fabric_per_unit, 2), data.get('participants', '')
+        ])
+
+        logger.info(f"Добавлена полная информация в лист {sheet_title}")
+
+        # Уведомление администратора
         admin_message = (
             f"✅ Заявка {request_id} полностью завершена!\n"
             f"Раскройщик: {message.from_user.full_name}\n"
             f"Изделие: {product_name}\n"
             f"Цвет ткани: {color}\n"
             f"Общая сумма выполненного: {final_sum}\n"
+            f"Расход ткани: {data.get('fabric_used', 0)} м\n"
         )
 
         try:
@@ -376,13 +515,19 @@ async def process_final_sum(bot, message, user_states, user_data, cutting_reques
         except Exception as e:
             logger.error(f"Ошибка уведомления администратора: {e}")
 
+        # Уведомление швей
+        await notify_seamstresses(bot, request_id, product_name, color, actual_sizes_dict,
+                                  cutting_requests_sheet._spreadsheet.worksheet("Users"))
+
         keyboard = [
             [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
         ]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
 
-        await bot.send_message(message.chat.id, f"✅ Заявка {request_id} полностью завершена с суммой {final_sum}!", reply_markup=reply_markup)
+        await bot.send_message(message.chat.id, f"✅ Заявка {request_id} полностью завершена с суммой {final_sum}!",
+                               reply_markup=reply_markup)
 
+        # Очистка данных
         del user_data[user_id]['requests'][request_id]
         if user_data[user_id].get('current_request_id') == request_id:
             user_data[user_id].pop('current_request_id', None)
@@ -391,3 +536,5 @@ async def process_final_sum(bot, message, user_states, user_data, cutting_reques
     except Exception as e:
         logger.error(f"Ошибка полного завершения заявки {request_id}: {e}")
         await bot.send_message(message.chat.id, "❌ Произошла ошибка при завершении заявки.")
+
+
