@@ -6,7 +6,7 @@ def is_authorized(user_id: int, users_sheet) -> bool:
     try:
         users = users_sheet.get_all_records()
         for user in users:
-            if str(user["ID"]).strip() == str(user_id) and user["Role"].strip() in ["Admin", "Cutter", "Seamstress"]:
+            if str(user["ID"]).strip() == str(user_id) and user["Role"].strip() in ["Admin", "Cutter", "Seamstress", "Assistant"]:
                 return True
         return False
     except Exception as e:

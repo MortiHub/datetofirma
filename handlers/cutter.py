@@ -31,6 +31,7 @@ async def handle_cutter_callbacks(bot, call, user_states, user_data, cutting_req
         await complete_request(bot, call, user_states, user_data, cutting_requests_sheet)
 
 
+
 async def view_requests(bot, call, user_states, user_data, cutting_requests_sheet):
     user_id = call.from_user.id
     role = get_user_role(user_id, cutting_requests_sheet._spreadsheet.worksheet("Users"))
@@ -95,25 +96,38 @@ async def continue_request(bot, call, user_states, user_data, cutting_requests_s
             await bot.answer_callback_query(call.id, "Эта заявка не в работе.", show_alert=True)
             return
 
-
         cutter_id = cutting_requests_sheet.cell(row_idx, 9).value
         if str(cutter_id) != str(user_id):
             await bot.answer_callback_query(call.id, "Эта заявка назначена другому пользователю.", show_alert=True)
             return
 
-        sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
-        sizes_dict = json.loads(sizes_json) if sizes_json else {}
+        # Получаем текущие данные
+        ordered_json = cutting_requests_sheet.cell(row_idx, 18).value
+        ordered_sizes_dict = json.loads(ordered_json) if ordered_json else {}
 
-        if not sizes_dict:
+        actual_json = cutting_requests_sheet.cell(row_idx, 19).value
+        actual_sizes_dict = json.loads(actual_json) if actual_json else {}
+
+        if not ordered_sizes_dict:
             await bot.edit_message_text(
                 "❌ В заявке не указаны размеры. Свяжитесь с администратором.",
                 call.message.chat.id, call.message.message_id
             )
             return
 
-        sizes_text = "\nОставшиеся размеры и количества:\n"
-        for size, qty in sorted(sizes_dict.items()):
-            sizes_text += f"  {size}: {qty}\n"
+        # Формируем текст с полной информацией
+        status_text = "\n📋 Статус заказа:\n"
+        active_sizes = []
+        for size in sorted(ordered_sizes_dict.keys()):
+            ordered_qty = ordered_sizes_dict[size]
+            actual_qty = actual_sizes_dict.get(size, 0)
+            remaining_qty = max(0, ordered_qty - actual_qty)
+
+            status_icon = "✅" if remaining_qty == 0 else "🔄"
+            status_text += f"  {status_icon} {size}: заказано {ordered_qty}, выполнено {actual_qty}, осталось {remaining_qty}\n"
+
+            if remaining_qty > 0:
+                active_sizes.append(size)
 
         if user_id not in user_data:
             user_data[user_id] = {}
@@ -121,10 +135,10 @@ async def continue_request(bot, call, user_states, user_data, cutting_requests_s
             user_data[user_id]['requests'] = {}
         user_data[user_id]['requests'][request_id] = {
             'row_idx': row_idx,
-            'ordered_sizes_dict': sizes_dict,
+            'ordered_sizes_dict': ordered_sizes_dict,
             'actual_sizes_dict': {},
             'stacks_dict': {},
-            'actual_selected_sizes': sorted(sizes_dict.keys()),
+            'actual_selected_sizes': active_sizes,  # Только размеры с остатком
             'actual_current_index': 0
         }
         user_data[user_id]['current_request_id'] = request_id
@@ -132,21 +146,18 @@ async def continue_request(bot, call, user_states, user_data, cutting_requests_s
         product_name = cutting_requests_sheet.cell(row_idx, 3).value
         color = cutting_requests_sheet.cell(row_idx, 4).value
         current_actual = int(cutting_requests_sheet.cell(row_idx, 11).value or 0)
-        ordered_quantity = sum(sizes_dict.values())
-        show_partial = True  # Изменено для всегда доступного partial
 
         confirmation_text = (
-            f"Продолжение заявки {request_id}:\n\n"
+            f"🔄 Продолжение заявки {request_id}:\n\n"
             f"Изделие: {product_name}\n"
             f"Цвет ткани: {color}\n"
-            f"Оставшиеся:\n{sizes_text}\n\n"
+            f"Уже выполнено: {current_actual} шт.\n"
+            f"{status_text}\n"
             f"Выберите тип закрытия:"
         )
         keyboard = []
-        if show_partial:
-            keyboard.append(
-                [types.InlineKeyboardButton("Частичное закрытие", callback_data=f"partial_start_{request_id}")])
-        keyboard.append([types.InlineKeyboardButton("Полное закрытие", callback_data=f"full_start_{request_id}")])
+        keyboard.append(
+            [types.InlineKeyboardButton("🔧 Частичное закрытие", callback_data=f"partial_start_{request_id}")])
         keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")])
         reply_markup = types.InlineKeyboardMarkup(keyboard)
         await bot.edit_message_text(
@@ -160,7 +171,6 @@ async def continue_request(bot, call, user_states, user_data, cutting_requests_s
         logger.error(f"Ошибка при продолжении заявки {request_id}: {e}")
         await bot.edit_message_text("❌ Произошла ошибка при продолжении заявки.", call.message.chat.id,
                                     call.message.message_id)
-
 
 async def accept_request(bot, call, user_states, user_data, cutting_requests_sheet, request_id):
     user_id = call.from_user.id
@@ -199,9 +209,10 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
             )
             return
 
-        sizes_text = "\nРазмеры и количества:\n"
+        # Формируем текст с заказанными количествами (при первом принятии это полный заказ)
+        sizes_text = "\n📋 Заказанные количества:\n"
         for size, qty in sorted(sizes_dict.items()):
-            sizes_text += f"  {size}: {qty}\n"
+            sizes_text += f"  • {size}: {qty} шт.\n"
 
         if user_id not in user_data:
             user_data[user_id] = {}
@@ -219,22 +230,16 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
 
         product_name = cutting_requests_sheet.cell(row_idx, 3).value
         color = cutting_requests_sheet.cell(row_idx, 4).value
-        current_actual = int(cutting_requests_sheet.cell(row_idx, 11).value or 0)
-        ordered_quantity = sum(sizes_dict.values())
-        show_partial = True  # Изменено для всегда доступного partial
 
         confirmation_text = (
-            f"Заявка {request_id} принята!\n\n"
+            f"✅ Заявка {request_id} принята!\n\n"
             f"Изделие: {product_name}\n"
             f"Цвет ткани: {color}\n"
-            f"Заказано:\n{sizes_text}\n\n"
+            f"{sizes_text}\n"
             f"Выберите тип закрытия:"
         )
         keyboard = []
-        if show_partial:
-            keyboard.append(
-                [types.InlineKeyboardButton("Частичное закрытие", callback_data=f"partial_start_{request_id}")])
-        keyboard.append([types.InlineKeyboardButton("Полное закрытие", callback_data=f"full_start_{request_id}")])
+        keyboard.append([types.InlineKeyboardButton("🔧 Частичное закрытие", callback_data=f"partial_start_{request_id}")])
         keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")])
         reply_markup = types.InlineKeyboardMarkup(keyboard)
         await bot.edit_message_text(
@@ -246,9 +251,7 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
 
     except Exception as e:
         logger.error(f"Ошибка при принятии заявки {request_id}: {e}")
-        await bot.edit_message_text("❌ Произошла ошибка при принятии заявки.", call.message.chat.id,
-                                    call.message.message_id)
-
+        await bot.edit_message_text("❌ Произошла ошибка при принятии заявки.", call.message.chat.id, call.message.message_id)
 
 async def back_to_cutter(bot, call, user_states, user_data):
     user_id = call.from_user.id

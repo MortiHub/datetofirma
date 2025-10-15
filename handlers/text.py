@@ -333,10 +333,12 @@ async def process_comment(bot, message, user_states, user_data):
         await bot.send_message(message.chat.id, "❌ Номер маршрутного листа не может быть пустым. Попробуйте снова:")
         return
 
+    # Сохраняем номер маршрутного листа
     user_data[user_id]['requests'][request_id]['route_list_number'] = route_list_number
+
     data = user_data[user_id]['requests'][request_id]
 
-    # ВАЖНО: Только для partial закрытия (full больше не используется)
+    # Для partial закрытия
     confirmation_text = await generate_partial_confirmation(data, route_list_number)
     keyboard = [
         [types.InlineKeyboardButton("✔ Подтвердить", callback_data=f"partial_complete_{request_id}")],

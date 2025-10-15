@@ -4,6 +4,7 @@ from sheets.users import is_authorized, get_user_role, has_pending_request
 from handlers.admin import handle_admin_callbacks
 from handlers.cutter import handle_cutter_callbacks
 from handlers.common import handle_common_callbacks
+from handlers.assistant import notify_assistant, handle_assistant_callbacks
 import logging
 import json
 import uuid
@@ -12,11 +13,20 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
-async def callback_handler(bot, call, user_states, user_data, users_sheet, requests_sheet, cutting_requests_sheet, products_sheet):
+async def callback_handler(bot, call, user_states, user_data, users_sheet, requests_sheet, cutting_requests_sheet,
+                           products_sheet):
     await bot.answer_callback_query(call.id)
     callback_data = call.data
     user_id = call.from_user.id
     logger.info(f"Обработка callback для пользователя {user_id}, данные: {callback_data}")
+
+    # Проверяем роль пользователя
+    role = get_user_role(user_id, users_sheet)
+
+    # Если пользователь помощница, обрабатываем специальные callback'и
+    if role == "Assistant":
+        await handle_assistant_callbacks(bot, call, user_states, user_data)
+        return
 
     state = user_states.get(user_id, None)
 
@@ -90,9 +100,7 @@ async def callback_handler(bot, call, user_states, user_data, users_sheet, reque
     if not is_authorized(user_id, users_sheet):
         if callback_data == "submit_request":
             if has_pending_request(user_id, requests_sheet):
-                await bot.answer_callback_query(call.id,
-                                                "У вас уже есть активная заявка! Ожидайте решения администратора.",
-                                                show_alert=True)
+                await bot.answer_callback_query(call.id, "У вас уже есть активная заявка! Ожидайте решения администратора.", show_alert=True)
                 return
 
             keyboard = [
@@ -115,13 +123,14 @@ async def callback_handler(bot, call, user_states, user_data, users_sheet, reque
             await start_callback(bot, call, users_sheet)
         return
 
-    role = get_user_role(user_id, users_sheet)
     if role == "Admin":
-        await handle_admin_callbacks(bot, call, user_states, user_data, users_sheet, requests_sheet, cutting_requests_sheet, products_sheet)
+        await handle_admin_callbacks(bot, call, user_states, user_data, users_sheet, requests_sheet,
+                                     cutting_requests_sheet, products_sheet)
     elif role in ["Cutter", "Seamstress"]:
         await handle_cutter_callbacks(bot, call, user_states, user_data, cutting_requests_sheet)
     else:
         await handle_common_callbacks(bot, call, user_states, user_data)
+
 
 async def select_colors(bot, call, user_states, user_data, products_sheet):
     user_id = call.from_user.id
@@ -145,7 +154,8 @@ async def select_colors(bot, call, user_states, user_data, products_sheet):
             [types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")]
         ]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
-        await bot.edit_message_text(f"Выберите тип размеров для цвета '{first_color}':", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+        await bot.edit_message_text(f"Выберите тип размеров для цвета '{first_color}':", call.message.chat.id,
+                                    call.message.message_id, reply_markup=reply_markup)
         user_states[user_id] = SIZES_TYPE
         return
 
@@ -183,10 +193,13 @@ async def select_colors(bot, call, user_states, user_data, products_sheet):
             keyboard.append([types.InlineKeyboardButton("✅ Готово", callback_data="colors_done")])
             keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_request")])
             reply_markup = types.InlineKeyboardMarkup(keyboard)
-            await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+            await bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                                reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Ошибка при обновлении выбора цветов: {e}")
-            await bot.edit_message_text("❌ Произошла ошибка при выборе цветов.", call.message.chat.id, call.message.message_id)
+            await bot.edit_message_text("❌ Произошла ошибка при выборе цветов.", call.message.chat.id,
+                                        call.message.message_id)
+
 
 async def process_sizes_type(bot, call, user_states, user_data):
     user_id = call.from_user.id
@@ -220,6 +233,7 @@ async def process_sizes_type(bot, call, user_states, user_data):
         reply_markup=reply_markup
     )
     user_states[user_id] = SELECT_SIZES
+
 
 async def select_sizes(bot, call, user_states, user_data):
     user_id = call.from_user.id
@@ -291,10 +305,18 @@ async def confirm_sizes(bot, call, user_states, user_data, cutting_requests_shee
             sizes_json = json.dumps(sizes_dict)
             total_quantity = sum(sizes_dict.values())
 
-            # ВАЖНО: Создаем корректный ID заявки
+            # Создаем корректный ID заявки
             request_id = f"CR-{datetime.now().strftime('%Y%m%d%H%M%S')}-{color[:3]}-{str(uuid.uuid4())[:8]}"
 
-            # ВАЖНО: Правильный порядок данных при создании заявки
+            # Создаем лист для заявки с названием "Заявка {product_name} {color}"
+            await create_request_sheet(
+                cutting_requests_sheet._spreadsheet,
+                product_name,
+                color,
+                sizes_dict
+            )
+
+            # Записываем в основную таблицу
             cutting_requests_sheet.append_row([
                 request_id,  # A: ID заявки
                 created_at,  # B: Дата создания
@@ -313,7 +335,7 @@ async def confirm_sizes(bot, call, user_states, user_data, cutting_requests_shee
                 "",  # O: Номер маршрутного листа
                 0,  # P: Расход на единицу
                 sizes_type_ru,  # Q: Тип размеров
-                sizes_json,  # R: Детали размеров
+                sizes_json,  # R: Детали размеров (заказанные)
                 "{}"  # S: Детали размеров (фактические)
             ])
 
@@ -345,6 +367,92 @@ async def confirm_sizes(bot, call, user_states, user_data, cutting_requests_shee
     finally:
         user_data.pop(user_id, None)
         user_states.pop(user_id, None)
+
+
+async def create_request_sheet(spreadsheet, product_name, color, ordered_sizes_dict):
+    """Создает отдельный лист для заявки с названием 'Заявка {product_name} {color}'"""
+    try:
+        # Создаем название листа в формате "Заявка {name} {color}"
+        sheet_title = f"Заявка {product_name} {color}"
+
+        # Ограничиваем длину названия (максимум 100 символов для Google Sheets)
+        if len(sheet_title) > 100:
+            sheet_title = sheet_title[:100]
+
+        try:
+            # Пытаемся получить существующий лист
+            sheet = spreadsheet.worksheet(sheet_title)
+            # Если лист существует, очищаем его
+            sheet.clear()
+        except:
+            # Если лист не существует, создаем новый
+            sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)  # Увеличили до 10 колонок
+
+        # Заголовки с новой колонкой "Остаток"
+        headers = [
+            "Изделие", "Размер", "Заказано", "Фактически", "Остаток",
+            "Стопки", "Цвет", "Расход ткани (м)", "Расход/ед. (м)", "Участники"
+        ]
+        sheet.append_row(headers)
+
+        # Форматирование заголовков
+        sheet.format("A1:J1", {
+            "textFormat": {"bold": True, "fontSize": 11},
+            "backgroundColor": {"red": 0.2, "green": 0.4, "blue": 0.6},
+            "horizontalAlignment": "CENTER",
+            "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}
+        })
+
+        # Записываем заказанные количества (они не будут меняться)
+        all_sizes = sorted(ordered_sizes_dict.keys())
+        for size in all_sizes:
+            ordered_qty = ordered_sizes_dict.get(size, 0)
+
+            sheet.append_row([
+                product_name,
+                str(size),
+                ordered_qty,  # Заказанное количество
+                0,  # Фактическое количество (пока 0)
+                ordered_qty,  # Остаток (изначально равен заказанному)
+                0,  # Стопки (пока 0)
+                color,
+                0,  # Расход ткани (пока 0)
+                0,  # Расход на единицу (пока 0)
+                ""  # Участники (пока пусто)
+            ])
+
+        # Итоговая строка с заказанными количествами
+        total_ordered = sum(ordered_sizes_dict.values())
+        sheet.append_row([
+            product_name,
+            "ИТОГО (Заказано)",
+            total_ordered,
+            0,  # Фактическое итого (пока 0)
+            total_ordered,  # Остаток итого (пока равен заказанному)
+            0,  # Стопки итого (пока 0)
+            color,
+            0,  # Расход ткани итого (пока 0)
+            0,  # Расход на единицу итого (пока 0)
+            ""  # Участники (пока пусто)
+        ])
+
+        # Форматирование итоговой строки
+        last_row = len(all_sizes) + 2
+        sheet.format(f"A{last_row}:J{last_row}", {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.9, "green": 0.95, "blue": 0.8}
+        })
+
+        # Автоматическое выравнивание столбцов
+        sheet.columns_auto_resize(0, 9)
+
+        logger.info(f"Создан/обновлен лист: {sheet_title}")
+
+    except Exception as e:
+        logger.error(f"Ошибка создания листа {sheet_title}: {e}")
+        raise
+
+
 async def start_partial_completion(bot, call, user_states, user_data, cutting_requests_sheet):
     request_id = call.data.replace("partial_start_", "")
     user_id = call.from_user.id
@@ -355,45 +463,105 @@ async def start_partial_completion(bot, call, user_states, user_data, cutting_re
         return
 
     data = user_data[user_id]['requests'][request_id]
-    actual_selected_sizes = data.get('actual_selected_sizes', [])
-    ordered_sizes_dict = data.get('ordered_sizes_dict', {})
 
-    if not actual_selected_sizes:
-        await bot.edit_message_text("❌ Нет размеров для ввода. Свяжитесь с администратором.", call.message.chat.id,
+    # Получаем текущие данные из таблицы
+    try:
+        requests = cutting_requests_sheet.get_all_records()
+        row_idx = None
+        for idx, req in enumerate(requests, 2):
+            if req.get("ID заявки") == request_id:
+                row_idx = idx
+                break
+
+        if not row_idx:
+            await bot.edit_message_text("❌ Заявка не найдена в таблице.", call.message.chat.id, call.message.message_id)
+            return
+
+        # Получаем текущие данные из колонок
+        ordered_json = cutting_requests_sheet.cell(row_idx, 18).value
+        ordered_sizes_dict = json.loads(ordered_json) if ordered_json else {}
+
+        actual_json = cutting_requests_sheet.cell(row_idx, 19).value
+        actual_sizes_dict = json.loads(actual_json) if actual_json else {}
+
+        # Вычисляем текущие остатки (включая нулевые)
+        current_remaining_dict = {}
+        active_sizes = []  # Размеры с ненулевым остатком
+        for size, ordered_qty in ordered_sizes_dict.items():
+            actual_qty = actual_sizes_dict.get(size, 0)
+            remaining = ordered_qty - actual_qty
+            current_remaining_dict[size] = max(0, remaining)
+            if remaining > 0:
+                active_sizes.append(size)
+
+        # Формируем текст с остатками (показываем все размеры)
+        remaining_text = "\n📋 Статус заказа:\n"
+        for size in sorted(ordered_sizes_dict.keys()):
+            ordered_qty = ordered_sizes_dict[size]
+            actual_qty = actual_sizes_dict.get(size, 0)
+            remaining_qty = max(0, ordered_qty - actual_qty)
+
+            status_icon = "✅" if remaining_qty == 0 else "🔄"
+            remaining_text += f"  {status_icon} {size}: заказано {ordered_qty}, выполнено {actual_qty}, осталось {remaining_qty}\n"
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных для заявки {request_id}: {e}")
+        await bot.edit_message_text("❌ Ошибка при получении данных заявки.", call.message.chat.id,
                                     call.message.message_id)
         return
 
-    first_size = actual_selected_sizes[0]
-    ordered_qty = ordered_sizes_dict.get(first_size, 0)  # Заказанное количество для этого размера
+    # Если все заказы выполнены
+    if not active_sizes:
+        await bot.edit_message_text("✅ Заказ уже выполнен полностью!", call.message.chat.id, call.message.message_id)
+        return
 
-    user_data[user_id]['requests'][request_id]['completion_type'] = 'partial'
+    first_size = active_sizes[0]
+    remaining_qty = current_remaining_dict[first_size]
 
-    # Формируем динамический текст с размером и количеством
-    message_text = f"Начато частичное закрытие заявки {request_id}.\nВведите фактическое количество для размера {first_size} (заказано: {ordered_qty}):"
+    # Сохраняем данные для частичного закрытия
+    data['ordered_sizes_dict'] = ordered_sizes_dict
+    data['remaining_sizes_dict'] = current_remaining_dict
+    data['actual_sizes_dict'] = {}
+    data['actual_selected_sizes'] = active_sizes  # Только размеры с ненулевым остатком
+    data['actual_current_index'] = 0
+    data['completion_type'] = 'partial'
 
-    # Добавляем клавиатуру для отмены, если нужно (как в других местах кода)
+    # Формируем динамический текст
+    message_text = (
+        f"🔧 Частичное закрытие заявки {request_id}\n"
+        f"{remaining_text}\n"
+        f"➡️ Введите фактическое количество для размера {first_size} (остаток: {remaining_qty}):"
+    )
+
     keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
     reply_markup = types.InlineKeyboardMarkup(keyboard)
 
     await bot.edit_message_text(message_text, call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
     user_states[user_id] = ACTUAL_SIZES_QUANTITY
-    data['actual_current_index'] = 0  # Убедимся, что индекс сброшен для ввода
+
+
 async def start_full_completion(bot, call, user_states, user_data, cutting_requests_sheet):
     request_id = call.data.replace("full_start_", "")
     user_id = call.from_user.id
-    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
-        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id][
+        'requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id,
+                                    call.message.message_id)
         return
 
     user_data[user_id]['requests'][request_id]['completion_type'] = 'full'
-    await bot.edit_message_text("Начато полное закрытие. Введите данные...", call.message.chat.id, call.message.message_id)
+    await bot.edit_message_text("Начато полное закрытие. Введите данные...", call.message.chat.id,
+                                call.message.message_id)
     user_states[user_id] = ACTUAL_SIZES_QUANTITY
+
 
 async def confirm_completion(bot, call, user_states, user_data, cutting_requests_sheet):
     request_id = call.data.replace("confirmcomplete_", "")  # Вычисляем здесь один раз
     user_id = call.from_user.id
-    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
-        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id][
+        'requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id,
+                                    call.message.message_id)
         return
 
     data = user_data[user_id]['requests'][request_id]
@@ -401,202 +569,21 @@ async def confirm_completion(bot, call, user_states, user_data, cutting_requests
     completion_type = data.get('completion_type', 'full')  # По умолчанию full
 
     if completion_type == 'partial':
-        await partial_complete(bot, call, user_states, user_data, cutting_requests_sheet, request_id)  # Передаём request_id
+        await partial_complete(bot, call, user_states, user_data, cutting_requests_sheet,
+                               request_id)  # Передаём request_id
     else:
-        await final_complete(bot, call, user_states, user_data, cutting_requests_sheet, request_id)  # Передаём request_id
+        await final_complete(bot, call, user_states, user_data, cutting_requests_sheet,
+                             request_id)  # Передаём request_id
 
-async def final_complete(bot, call, user_states, user_data, cutting_requests_sheet, request_id):  # Добавили request_id как параметр
+
+async def final_complete(bot, call, user_states, user_data, cutting_requests_sheet,
+                         request_id):  # Добавили request_id как параметр
     user_id = call.from_user.id
     keyboard = [[types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")]]
     reply_markup = types.InlineKeyboardMarkup(keyboard)
-    await bot.edit_message_text("Введите финальную сумму для полного закрытия:", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
+    await bot.edit_message_text("Введите финальную сумму для полного закрытия:", call.message.chat.id,
+                                call.message.message_id, reply_markup=reply_markup)
 
-
-
-def create_beautiful_sheet(spreadsheet, sheet_title, product_name, color, ordered_sizes_dict, actual_sizes_dict, data,
-                           final_sum=None):
-    """Создает чистую, правильно отформатированную таблицу"""
-    try:
-        # Создаем или очищаем лист
-        try:
-            sheet = spreadsheet.worksheet(sheet_title)
-            sheet.clear()
-        except:
-            sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=9)
-
-        # Заголовки
-        headers = [
-            "Изделие", "Размер", "Заказано", "Фактически",
-            "Стопки", "Цвет", "Расход ткани (м)", "Расход/ед. (м)", "Участники"
-        ]
-        sheet.append_row(headers)
-
-        # Форматирование заголовков
-        sheet.format("A1:I1", {
-            "textFormat": {"bold": True, "fontSize": 11},
-            "backgroundColor": {"red": 0.2, "green": 0.4, "blue": 0.6},
-            "horizontalAlignment": "CENTER",
-            "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}
-        })
-
-        # ВАЖНО: Используем все размеры из оригинального заказа
-        all_sizes = sorted(set(list(ordered_sizes_dict.keys())))
-        total_ordered = 0
-        total_actual = 0
-        total_stacks = 0
-
-        # Данные по размерам
-        for size in all_sizes:
-            ordered_qty = ordered_sizes_dict.get(size, 0)
-            actual_qty = actual_sizes_dict.get(size, 0)
-            stacks = data.get('stacks_dict', {}).get(size, 0)
-
-            # Расчет расхода на единицу (только для фактически произведенных)
-            fabric_per_unit = data.get('fabric_used', 0) / actual_qty if actual_qty > 0 else 0
-
-            sheet.append_row([
-                product_name,
-                str(size),
-                ordered_qty,
-                actual_qty,
-                stacks,
-                color,
-                data.get('fabric_used', 0) if actual_qty > 0 else 0,  # Расход только для произведенных
-                round(fabric_per_unit, 3),
-                data.get('participants', '')
-            ])
-
-            total_ordered += ordered_qty
-            total_actual += actual_qty
-            total_stacks += stacks
-
-        # Итоговая строка
-        total_fabric_per_unit = data.get('fabric_used', 0) / total_actual if total_actual > 0 else 0
-
-        sheet.append_row([
-            product_name,
-            "ИТОГО",
-            total_ordered,
-            total_actual,
-            total_stacks,
-            color,
-            data.get('fabric_used', 0),
-            round(total_fabric_per_unit, 3),
-            data.get('participants', '')
-        ])
-
-        # Форматирование итоговой строки
-        last_row = len(all_sizes) + 2  # +2 потому что заголовок и итоговая строка
-        sheet.format(f"A{last_row}:I{last_row}", {
-            "textFormat": {"bold": True},
-            "backgroundColor": {"red": 0.9, "green": 0.95, "blue": 0.8}
-        })
-
-        # Автоматическое выравнивание столбцов
-        sheet.columns_auto_resize(0, 8)  # Столбцы A-I
-
-        return sheet
-
-    except Exception as e:
-        logger.error(f"Ошибка создания листа {sheet_title}: {e}")
-        raise
-
-
-async def create_partial_sheet(spreadsheet, sheet_title, product_name, color, original_ordered_dict, new_actual_dict,
-                               data, is_complete=False):
-    """Создает правильно отформатированный лист для partial закрытия"""
-    try:
-        # Пытаемся получить существующий лист
-        try:
-            sheet = spreadsheet.worksheet(sheet_title)
-            existing_data = sheet.get_all_records()
-        except:
-            sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=9)
-            existing_data = []
-
-        # ВАЖНО: Полностью очищаем и создаем заново для правильного форматирования
-        sheet.clear()
-
-        # Заголовки с правильными русскими названиями
-        headers = [
-            "Изделие", "Размер", "Заказано", "Фактически",
-            "Стопки", "Цвет", "Расход ткани (м)", "Расход/ед. (м)", "Участники"
-        ]
-        sheet.append_row(headers)
-
-        # Форматирование заголовков
-        sheet.format("A1:I1", {
-            "textFormat": {"bold": True},
-            "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
-            "horizontalAlignment": "CENTER"
-        })
-
-        # ВАЖНО: Для каждого размера создаем одну строку с правильными данными
-        all_sizes = sorted(set(list(original_ordered_dict.keys()) + list(new_actual_dict.keys())))
-
-        total_ordered = 0
-        total_actual = 0
-        total_stacks = 0
-        total_fabric = data.get('fabric_used', 0)
-
-        for size in all_sizes:
-            ordered_qty = original_ordered_dict.get(size, 0)
-            actual_qty = new_actual_dict.get(size, 0)  # Только новые данные
-            stacks_qty = data.get('stacks_dict', {}).get(size, 0)
-
-            # Расчет расхода на единицу для этого размера
-            fabric_per_unit = total_fabric / actual_qty if actual_qty > 0 else 0
-
-            # Добавляем строку с правильным порядком данных
-            sheet.append_row([
-                product_name,  # A: Изделие
-                str(size),  # B: Размер
-                ordered_qty,  # C: Заказано
-                actual_qty,  # D: Фактически
-                stacks_qty,  # E: Стопки
-                color,  # F: Цвет
-                total_fabric,  # G: Расход ткани (м)
-                round(fabric_per_unit, 3),  # H: Расход/ед. (м)
-                data.get('participants', '')  # I: Участники
-            ])
-
-            total_ordered += ordered_qty
-            total_actual += actual_qty
-            total_stacks += stacks_qty
-
-        # Добавляем итоговую строку
-        total_fabric_per_unit = total_fabric / total_actual if total_actual > 0 else 0
-
-        sheet.append_row([
-            product_name,  # A: Изделие
-            "ИТОГО",  # B: Размер
-            total_ordered,  # C: Заказано
-            total_actual,  # D: Фактически
-            total_stacks,  # E: Стопки
-            color,  # F: Цвет
-            total_fabric,  # G: Расход ткани (м)
-            round(total_fabric_per_unit, 3),  # H: Расход/ед. (м)
-            data.get('participants', '')  # I: Участники
-        ])
-
-        # Форматирование итоговой строки
-        last_row = len(all_sizes) + 2
-        sheet.format(f"A{last_row}:I{last_row}", {
-            "textFormat": {"bold": True},
-            "backgroundColor": {"red": 0.95, "green": 0.95, "blue": 0.8}
-        })
-
-        # Автоматическое выравнивание ширины столбцов
-        try:
-            sheet.columns_auto_resize(0, 8)  # Столбцы A-I
-        except:
-            pass  # Если авто-резайз не поддерживается
-
-        logger.info(f"Лист {sheet_title} создан/обновлен корректно")
-
-    except Exception as e:
-        logger.error(f"Ошибка создания листа {sheet_title}: {e}")
-        raise
 
 async def partial_complete(bot, call, user_states, user_data, cutting_requests_sheet, request_id=None):
     if request_id is None:
@@ -614,9 +601,9 @@ async def partial_complete(bot, call, user_states, user_data, cutting_requests_s
     row_idx = data['row_idx']
 
     try:
-        # Получаем текущие данные
-        current_remaining_json = cutting_requests_sheet.cell(row_idx, 18).value
-        current_remaining_dict = json.loads(current_remaining_json) if current_remaining_json else {}
+        # Получаем текущие данные из основной таблицы
+        ordered_json = cutting_requests_sheet.cell(row_idx, 18).value
+        ordered_sizes_dict = json.loads(ordered_json) if ordered_json else {}
 
         current_actual_json = cutting_requests_sheet.cell(row_idx, 19).value
         current_actual_dict = json.loads(current_actual_json) if current_actual_json else {}
@@ -634,35 +621,17 @@ async def partial_complete(bot, call, user_states, user_data, cutting_requests_s
         elif data.get('route_list_number'):
             route_list_to_use = current_route_list
 
-        # ВАЖНО: Получаем ОРИГИНАЛЬНЫЕ заказанные данные (не остатки!)
-        # Для этого нужно хранить оригинальные данные отдельно или вычислять их
-        original_ordered_json = cutting_requests_sheet.cell(row_idx, 18).value  # Это текущие остатки
-        # Восстанавливаем оригинальные данные: остатки + все фактические (текущие + новые)
-        original_ordered_dict = current_remaining_dict.copy()
-        for size, qty in current_actual_dict.items():
-            original_ordered_dict[size] = original_ordered_dict.get(size, 0) + qty
-        for size, qty in data['actual_sizes_dict'].items():
-            original_ordered_dict[size] = original_ordered_dict.get(size, 0) + qty
-
-        # Обновляем остатки
-        remaining_sizes_dict = current_remaining_dict.copy()
-        for size, new_qty in data['actual_sizes_dict'].items():
-            if size in remaining_sizes_dict:
-                remaining_sizes_dict[size] -= new_qty
-                if remaining_sizes_dict[size] <= 0:
-                    del remaining_sizes_dict[size]
-
-        # Обновляем фактические данные
+        # Обновляем фактические данные (добавляем к существующим)
         updated_actual_dict = current_actual_dict.copy()
         for size, qty in data['actual_sizes_dict'].items():
             updated_actual_dict[size] = updated_actual_dict.get(size, 0) + qty
 
         # Обновляем таблицу
-        cutting_requests_sheet.update_cell(row_idx, 18, json.dumps(remaining_sizes_dict))
         cutting_requests_sheet.update_cell(row_idx, 19, json.dumps(updated_actual_dict))
 
         total_new_actual = sum(data['actual_sizes_dict'].values())
-        cutting_requests_sheet.update_cell(row_idx, 11, current_actual_quantity + total_new_actual)
+        new_total_actual = current_actual_quantity + total_new_actual
+        cutting_requests_sheet.update_cell(row_idx, 11, new_total_actual)
 
         # Обновляем расход ткани и участников
         new_fabric = current_fabric + data.get('fabric_used', 0)
@@ -674,43 +643,93 @@ async def partial_complete(bot, call, user_states, user_data, cutting_requests_s
                 'participants']
             cutting_requests_sheet.update_cell(row_idx, 14, updated_participants)
 
-        # Создаем/обновляем лист с маршрутным номером
+        # Вычисляем новые остатки
+        new_remaining_sizes_dict = {}
+        for size, ordered_qty in ordered_sizes_dict.items():
+            actual_qty = updated_actual_dict.get(size, 0)
+            remaining = ordered_qty - actual_qty
+            if remaining > 0:
+                new_remaining_sizes_dict[size] = remaining
+
+        # Обновляем лист заявки с новыми фактическими данными
         product_name = cutting_requests_sheet.cell(row_idx, 3).value
         color = cutting_requests_sheet.cell(row_idx, 4).value
 
         spreadsheet = cutting_requests_sheet._spreadsheet
-        sheet_title = f"{route_list_to_use}-{color}"
 
-        # ВАЖНО: Создаем лист ТОЛЬКО с текущими данными (не изменяем существующие строки)
-        await create_partial_sheet(
+        # Если номер маршрутного листа изменился, переименовываем лист
+        if route_list_to_use and route_list_to_use != current_route_list:
+            old_sheet_title = f"Заявка {product_name} {color}"
+            new_sheet_title = f"Заявка {route_list_to_use} {color}"
+            await rename_request_sheet(spreadsheet, old_sheet_title, new_sheet_title)
+
+        await update_request_sheet(
             spreadsheet,
-            sheet_title,
             product_name,
             color,
-            original_ordered_dict,  # Оригинальные заказанные данные
-            data['actual_sizes_dict'],  # ТОЛЬКО новые фактические данные (не все)
+            ordered_sizes_dict,  # Заказанные данные (не меняются)
+            updated_actual_dict,  # Все фактические данные (накопленные)
             data,
-            is_complete=not remaining_sizes_dict  # Если остатков нет - это полное закрытие
+            route_list_to_use
         )
 
-        # ВАЖНО: Автоматическое полное закрытие при отсутствии остатков
-        if not remaining_sizes_dict:
+        # Уведомляем помощницу о частичном закрытии
+        await notify_assistant(
+            bot=bot,
+            request_id=request_id,
+            product_name=product_name,
+            color=color,  # Добавляем цвет
+            route_list_number=route_list_to_use,
+            completion_type='partial',
+            sizes_data=data['actual_sizes_dict']
+        )
+
+        # Проверяем, выполнена ли заявка полностью
+        is_complete = not new_remaining_sizes_dict
+
+        # Формируем сообщение с остатками
+        remaining_text = ""
+        if new_remaining_sizes_dict:
+            remaining_text = "\n📋 Остатки по заказу:\n"
+            for size, qty in sorted(new_remaining_sizes_dict.items()):
+                remaining_text += f"  • {size}: {qty} шт.\n"
+        else:
+            remaining_text = "\n✅ Заказ выполнен полностью!\n"
+
+        if is_complete:
             # Автоматически закрываем заявку как выполненную
             cutting_requests_sheet.update_cell(row_idx, 6, "Выполнена")
-            cutting_requests_sheet.update_cell(row_idx, 11,
-                                               sum(updated_actual_dict.values()))  # Общее фактическое количество
-
             await notify_seamstresses(bot, request_id, product_name, color, updated_actual_dict,
                                       cutting_requests_sheet._spreadsheet.worksheet("Users"))
 
-            # Уведомление о полном завершении
+            # Подготавливаем данные для полного уведомления помощнице
+            total_sizes_data = {}
+            for size in ordered_sizes_dict.keys():
+                total_sizes_data[size] = {
+                    'ordered': ordered_sizes_dict.get(size, 0),
+                    'actual': updated_actual_dict.get(size, 0)
+                }
+
+            # Уведомляем помощницу о полном закрытии
+            await notify_assistant(
+                bot=bot,
+                request_id=request_id,
+                product_name=product_name,
+                color=color,
+                route_list_number=route_list_to_use,
+                completion_type='complete',
+                sizes_data={},  # Пустой для полного закрытия
+                total_data=total_sizes_data
+            )
+
             keyboard = [[types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]]
             reply_markup = types.InlineKeyboardMarkup(keyboard)
 
             await bot.edit_message_text(
-                f"✅ Заявка {request_id} полностью завершена автоматически!\n"
-                f"Общее количество: {sum(updated_actual_dict.values())} шт.\n"
-                f"Расход ткани: {new_fabric} м",
+                f"✅ Заявка {request_id} полностью завершена!\n"
+                f"Общее количество: {new_total_actual} шт.\n"
+                f"Расход ткани: {new_fabric} м"
+                f"{remaining_text}",
                 call.message.chat.id, call.message.message_id,
                 reply_markup=reply_markup
             )
@@ -721,17 +740,23 @@ async def partial_complete(bot, call, user_states, user_data, cutting_requests_s
             await notify_seamstresses(bot, request_id, product_name, color, data['actual_sizes_dict'],
                                       cutting_requests_sheet._spreadsheet.worksheet("Users"))
 
-            keyboard = [[types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]]
+            keyboard = [
+                [types.InlineKeyboardButton("🔄 Продолжить закрытие", callback_data=f"continue_request_{request_id}")],
+                [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
+            ]
             reply_markup = types.InlineKeyboardMarkup(keyboard)
 
-            remaining_text = ", ".join([f"{size}: {qty}" for size, qty in remaining_sizes_dict.items()])
             await bot.edit_message_text(
-                f"✅ Частичное закрытие заявки {request_id} завершено!\nОстатки: {remaining_text}",
+                f"✅ Частичное закрытие заявки {request_id} завершено!\n"
+                f"Выполнено в этом закрытии: {total_new_actual} шт.\n"
+                f"Общее выполнено: {new_total_actual} шт.\n"
+                f"Расход ткани: {data.get('fabric_used', 0)} м"
+                f"{remaining_text}",
                 call.message.chat.id, call.message.message_id,
                 reply_markup=reply_markup
             )
 
-        # Всегда очищаем данные пользователя после закрытия (полного или частичного)
+        # Очищаем данные пользователя после закрытия
         del user_data[user_id]['requests'][request_id]
         if user_data[user_id].get('current_request_id') == request_id:
             user_data[user_id].pop('current_request_id', None)
@@ -740,6 +765,145 @@ async def partial_complete(bot, call, user_states, user_data, cutting_requests_s
     except Exception as e:
         logger.error(f"Ошибка при частичном завершении {request_id}: {e}")
         await bot.edit_message_text(f"❌ Ошибка: {str(e)}", call.message.chat.id, call.message.message_id)
+
+
+async def update_request_sheet(spreadsheet, product_name, color, ordered_sizes_dict, actual_sizes_dict, data,
+                               route_list_number):
+    """Обновляет лист заявки с фактическими данными и остатками"""
+    try:
+        # Формируем новое название листа с номером маршрута
+        if route_list_number and route_list_number.strip():
+            sheet_title = f"Заявка {route_list_number} {color}"
+        else:
+            sheet_title = f"Заявка {product_name} {color}"
+
+        if len(sheet_title) > 100:
+            sheet_title = sheet_title[:100]
+
+        # Пытаемся получить лист с новым названием
+        try:
+            sheet = spreadsheet.worksheet(sheet_title)
+        except:
+            # Если лист с новым названием не найден, пробуем найти со старым названием
+            old_sheet_title = f"Заявка {product_name} {color}"
+            try:
+                sheet = spreadsheet.worksheet(old_sheet_title)
+                # Переименовываем лист в новое название
+                sheet.update_title(sheet_title)
+                logger.info(f"Лист автоматически переименован: {old_sheet_title} -> {sheet_title}")
+            except:
+                # Если ни один лист не найден, создаем новый
+                sheet = spreadsheet.add_worksheet(title=sheet_title, rows=100, cols=10)
+
+        # Очищаем лист
+        sheet.clear()
+
+        # Заголовки с колонкой "Остаток"
+        headers = [
+            "Изделие", "Размер", "Заказано", "Фактически", "Остаток",
+            "Стопки", "Цвет", "Расход ткани (м)", "Расход/ед. (м)", "Участники"
+        ]
+        sheet.append_row(headers)
+
+        # Форматирование заголовков
+        sheet.format("A1:J1", {
+            "textFormat": {"bold": True, "fontSize": 11},
+            "backgroundColor": {"red": 0.2, "green": 0.4, "blue": 0.6},
+            "horizontalAlignment": "CENTER",
+            "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}}
+        })
+
+        # Записываем данные ВСЕХ размеров, даже с нулевым остатком
+        all_sizes = sorted(set(list(ordered_sizes_dict.keys()) + list(actual_sizes_dict.keys())))
+        total_ordered = 0
+        total_actual = 0
+        total_remaining = 0
+        total_stacks = 0
+
+        for size in all_sizes:
+            ordered_qty = ordered_sizes_dict.get(size, 0)
+            actual_qty = actual_sizes_dict.get(size, 0)
+            remaining_qty = max(0, ordered_qty - actual_qty)  # Остаток не может быть отрицательным
+            stacks_qty = data.get('stacks_dict', {}).get(size, 0)
+
+            # Расчет расхода на единицу для этого размера
+            fabric_per_unit = data.get('fabric_used', 0) / actual_qty if actual_qty > 0 else 0
+
+            sheet.append_row([
+                product_name,
+                str(size),
+                ordered_qty,  # Заказанное количество (не меняется)
+                actual_qty,  # Фактическое количество (обновляется)
+                remaining_qty,  # Остаток (может быть 0)
+                stacks_qty,  # Стопки
+                color,
+                data.get('fabric_used', 0) if actual_qty > 0 else 0,
+                round(fabric_per_unit, 3),
+                data.get('participants', '')
+            ])
+
+            total_ordered += ordered_qty
+            total_actual += actual_qty
+            total_remaining += remaining_qty
+            total_stacks += stacks_qty
+
+        # Итоговая строка
+        total_fabric_per_unit = data.get('fabric_used', 0) / total_actual if total_actual > 0 else 0
+
+        sheet.append_row([
+            product_name,
+            "ИТОГО",
+            total_ordered,
+            total_actual,
+            total_remaining,
+            total_stacks,
+            color,
+            data.get('fabric_used', 0),
+            round(total_fabric_per_unit, 3),
+            data.get('participants', '')
+        ])
+
+        # Форматирование итоговой строки
+        last_row = len(all_sizes) + 2
+        sheet.format(f"A{last_row}:J{last_row}", {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.9, "green": 0.95, "blue": 0.8}
+        })
+
+        # Добавляем информацию о маршрутном листе
+        sheet.append_row(["", "", "", "", "", "", "", "", "", ""])  # Пустая строка
+        sheet.append_row(["Маршрутный лист:", route_list_number, "", "", "", "", "", "", "", ""])
+
+        # Автоматическое выравнивание столбцов
+        sheet.columns_auto_resize(0, 9)
+
+        logger.info(f"Обновлен лист заявки: {sheet_title}")
+
+    except Exception as e:
+        logger.error(f"Ошибка обновления листа заявки {sheet_title}: {e}")
+        raise
+
+
+async def rename_request_sheet(spreadsheet, old_sheet_title, new_sheet_title):
+    """Переименовывает лист заявки"""
+    try:
+        # Ограничиваем длину названия
+        if len(new_sheet_title) > 100:
+            new_sheet_title = new_sheet_title[:100]
+
+        # Пытаемся получить старый лист
+        try:
+            sheet = spreadsheet.worksheet(old_sheet_title)
+            # Переименовываем лист
+            sheet.update_title(new_sheet_title)
+            logger.info(f"Лист переименован: {old_sheet_title} -> {new_sheet_title}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка переименования листа {old_sheet_title}: {e}")
+            return False
+    except Exception as e:
+        logger.error(f"Ошибка в функции переименования: {e}")
+        return False
 
 
 async def notify_seamstresses(bot, request_id, product_name, color, actual_sizes_dict, users_sheet):
@@ -769,11 +933,14 @@ async def notify_seamstresses(bot, request_id, product_name, color, actual_sizes
     except Exception as e:
         logger.error(f"Ошибка при получении списка швей: {e}")
 
+
 async def edit_completion(bot, call, user_states, user_data, cutting_requests_sheet):
     request_id = call.data.replace("edit_completion_", "")
     user_id = call.from_user.id
-    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
-        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id, call.message.message_id)
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id][
+        'requests']:
+        await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id,
+                                    call.message.message_id)
         return
 
     data = user_data[user_id]['requests'][request_id]
@@ -791,11 +958,13 @@ async def edit_completion(bot, call, user_states, user_data, cutting_requests_sh
     )
     user_states[user_id] = ACTUAL_SIZES_QUANTITY
 
+
 async def cancel_completion(bot, call, user_states, user_data):
     request_id = call.data.replace("cancel_completion_", "")
     user_id = call.from_user.id
 
-    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id]['requests']:
+    if user_id not in user_data or 'requests' not in user_data[user_id] or request_id not in user_data[user_id][
+        'requests']:
         await bot.edit_message_text("❌ Ошибка: данные заявки не найдены.", call.message.chat.id,
                                     call.message.message_id)
         return
@@ -815,6 +984,7 @@ async def cancel_completion(bot, call, user_states, user_data):
         call.message.chat.id, call.message.message_id,
         reply_markup=reply_markup
     )
+
 
 async def cancel_request(bot, call, user_states, user_data, users_sheet):
     user_id = call.from_user.id
@@ -857,6 +1027,11 @@ async def cancel_request(bot, call, user_states, user_data, users_sheet):
         keyboard = [
             [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
         ]
+    elif role == "Assistant":
+        keyboard = [
+            [types.InlineKeyboardButton("📊 Статус печати", callback_data="print_status")],
+            [types.InlineKeyboardButton("📋 Активные заявки", callback_data="active_requests")]
+        ]
     else:
         try:
             await bot.edit_message_text(
@@ -887,6 +1062,7 @@ async def cancel_request(bot, call, user_states, user_data, users_sheet):
         except Exception as e:
             logger.error(f"Ошибка при отправке нового сообщения пользователю {user_id}: {e}")
 
+
 async def start_callback(bot, call, users_sheet):
     user_id = call.from_user.id
     keyboard = []
@@ -901,6 +1077,11 @@ async def start_callback(bot, call, users_sheet):
             keyboard = [
                 [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
             ]
+        elif role == "Assistant":
+            keyboard = [
+                [types.InlineKeyboardButton("📊 Статус печати", callback_data="print_status")],
+                [types.InlineKeyboardButton("📋 Активные заявки", callback_data="active_requests")]
+            ]
     else:
         keyboard = [
             [types.InlineKeyboardButton("Подать заявку", callback_data="submit_request")]
@@ -909,6 +1090,8 @@ async def start_callback(bot, call, users_sheet):
     reply_markup = types.InlineKeyboardMarkup(keyboard)
     await bot.edit_message_text("Добро пожаловать! Выберите действие:", call.message.chat.id, call.message.message_id,
                                 reply_markup=reply_markup)
+
+
 async def notify_cutters(bot, request_id, created_at, product_name, sizes_dict, users_sheet):
     try:
         users = users_sheet.get_all_records()
@@ -935,4 +1118,3 @@ async def notify_cutters(bot, request_id, created_at, product_name, sizes_dict, 
                     logger.error(f"Ошибка при уведомлении пользователя {user['ID']}: {e}")
     except Exception as e:
         logger.error(f"Ошибка при получении списка пользователей: {e}")
-

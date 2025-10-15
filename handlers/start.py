@@ -26,6 +26,11 @@ async def start_handler(bot, message, users_sheet):
             keyboard = [
                 [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
             ]
+        elif role == "Assistant":
+            keyboard = [
+                [types.InlineKeyboardButton("📊 Статус печати", callback_data="print_status")],
+                [types.InlineKeyboardButton("📋 Активные заявки", callback_data="active_requests")]
+            ]
     else:
         keyboard = [
             [types.InlineKeyboardButton("Подать заявку", callback_data="submit_request")]
