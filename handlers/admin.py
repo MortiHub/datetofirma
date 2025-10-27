@@ -170,3 +170,154 @@ async def view_requests(bot, call, user_states, user_data, cutting_requests_shee
     except Exception as e:
         logger.error(f"Ошибка при получении заявок: {e}")
         await bot.answer_callback_query(call.id, "Произошла ошибка при загрузке заявок.", show_alert=True)
+
+
+async def notify_admin(bot, request_id, event_type, details, users_sheet):
+    """
+    Уведомляет администратора о событиях с заявками на раскрой
+
+    Args:
+        bot: бот для отправки сообщений
+        request_id: ID заявки
+        event_type: тип события ('accepted', 'partial_complete', 'full_complete')
+        details: словарь с деталями события
+        users_sheet: таблица пользователей
+    """
+    try:
+        # Получаем список администраторов
+        users = users_sheet.get_all_records()
+        admins = [user for user in users if user["Role"].strip() == "Admin"]
+
+        if not admins:
+            logger.warning("Не найдено администраторов для уведомления")
+            return
+
+        # Формируем сообщение в зависимости от типа события
+        if event_type == 'accepted':
+            message_text = await generate_accepted_notification(request_id, details)
+        elif event_type == 'partial_complete':
+            message_text = await generate_partial_complete_notification(request_id, details)
+        elif event_type == 'full_complete':
+            message_text = await generate_full_complete_notification(request_id, details)
+        else:
+            return
+
+        # Отправляем сообщение всем администраторам
+        for admin in admins:
+            try:
+                keyboard = [
+                    [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
+                ]
+                reply_markup = types.InlineKeyboardMarkup(keyboard)
+
+                await bot.send_message(
+                    admin["ID"],
+                    message_text,
+                    reply_markup=reply_markup,
+                    parse_mode="Markdown"
+                )
+                logger.info(f"Уведомление отправлено администратору {admin['ID']}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления администратору {admin['ID']}: {e}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в функции уведомления администратора: {e}")
+
+
+async def generate_accepted_notification(request_id, details):
+    """Генерирует текст уведомления о взятии заявки"""
+    text = (
+        "✅ *Заявка взята в работу*\n\n"
+        f"*ID заявки:* {request_id}\n"
+        f"*Изделие:* {details.get('product_name', 'N/A')}\n"
+        f"*Цвет:* {details.get('color', 'N/A')}\n"
+        f"*Раскройщик:* {details.get('cutter_name', 'N/A')}\n"
+        f"*ID раскройщика:* {details.get('cutter_id', 'N/A')}\n"
+        f"*Дата принятия:* {details.get('accepted_at', 'N/A')}\n\n"
+    )
+
+    # Добавляем информацию о заказанных количествах
+    if details.get('ordered_sizes'):
+        text += "*Заказанные количества:*\n"
+        for size, qty in sorted(details['ordered_sizes'].items()):
+            text += f"  • Размер {size}: {qty} шт.\n"
+
+    text += "\n📋 Заявка переведена в статус 'В работе'"
+    return text
+
+
+async def generate_partial_complete_notification(request_id, details):
+    """Генерирует текст уведомления о частичном закрытии"""
+    text = (
+        "🔄 *Частичное закрытие заявки*\n\n"
+        f"*ID заявки:* {request_id}\n"
+        f"*Изделие:* {details.get('product_name', 'N/A')}\n"
+        f"*Цвет:* {details.get('color', 'N/A')}\n"
+        f"*Раскройщик:* {details.get('cutter_name', 'N/A')}\n"
+        f"*Номер заявки:* {details.get('route_list', 'N/A')}\n\n"
+    )
+
+    # Добавляем информацию о выполненной работе
+    if details.get('completed_sizes'):
+        text += "*Выполнено в этом закрытии:*\n"
+        for size, qty in sorted(details['completed_sizes'].items()):
+            text += f"  • Размер {size}: {qty} шт.\n"
+
+    # Добавляем информацию о стопках
+    if details.get('stacks_data'):
+        text += "\n*Количество стопок:*\n"
+        for size, stacks in sorted(details['stacks_data'].items()):
+            if stacks > 0:
+                text += f"  • Размер {size}: {stacks} стопок\n"
+
+    # Добавляем общую информацию
+    text += f"\n*Общее выполнено:* {details.get('total_completed', 0)}/{details.get('total_ordered', 0)} шт."
+    text += f"\n*Расход ткани:* {details.get('fabric_used', 0)} м"
+    text += f"\n*Участники:* {details.get('participants', 'N/A')}"
+
+    # Добавляем информацию об остатках
+    if details.get('remaining_sizes'):
+        text += "\n\n*Остатки по заказу:*\n"
+        for size, qty in sorted(details['remaining_sizes'].items()):
+            if qty > 0:
+                text += f"  • Размер {size}: {qty} шт.\n"
+
+    return text
+
+
+async def generate_full_complete_notification(request_id, details):
+    """Генерирует текст уведомления о полном закрытии"""
+    text = (
+        "🏁 *Заявка полностью завершена!*\n\n"
+        f"*ID заявки:* {request_id}\n"
+        f"*Изделие:* {details.get('product_name', 'N/A')}\n"
+        f"*Цвет:* {details.get('color', 'N/A')}\n"
+        f"*Раскройщик:* {details.get('cutter_name', 'N/A')}\n"
+        f"*Номер заявки:* {details.get('route_list', 'N/A')}\n\n"
+    )
+
+    # Добавляем итоговую информацию
+    text += "*Итоговые выполнения:*\n"
+    for size, data in sorted(details.get('final_data', {}).items()):
+        ordered = data.get('ordered', 0)
+        actual = data.get('actual', 0)
+        stacks = data.get('stacks', 0)
+
+        stack_info = f", стопок: {stacks}" if stacks > 0 else ""
+        text += f"  • Размер {size}: {actual}/{ordered} шт.{stack_info}\n"
+
+    # Общие итоги
+    total_ordered = details.get('total_ordered', 0)
+    total_actual = details.get('total_actual', 0)
+    total_stacks = details.get('total_stacks', 0)
+
+    text += f"\n*Итого заказано:* {total_ordered} шт."
+    text += f"\n*Итого выполнено:* {total_actual} шт."
+
+    if total_stacks > 0:
+        text += f"\n*Итого стопок:* {total_stacks}"
+
+    text += f"\n*Общий расход ткани:* {details.get('total_fabric', 0)} м"
+    text += f"\n*Участники:* {details.get('participants', 'N/A')}"
+
+    return text

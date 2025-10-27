@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 
 async def notify_assistant(bot, request_id, product_name, color, route_list_number, completion_type, sizes_data,
-                           total_data=None):
+                           total_data=None, stacks_data=None):  # Добавили stacks_data
     """
     Уведомляет помощницу о необходимости печати штрих-кодов
 
@@ -19,6 +19,7 @@ async def notify_assistant(bot, request_id, product_name, color, route_list_numb
         completion_type: тип закрытия ('partial' или 'complete')
         sizes_data: словарь с размерами и количествами
         total_data: общие данные (только для полного закрытия)
+        stacks_data: данные о стопках (только для частичного закрытия)
     """
     try:
         # Получаем список помощниц из базы данных
@@ -35,7 +36,7 @@ async def notify_assistant(bot, request_id, product_name, color, route_list_numb
         # Формируем сообщение в зависимости от типа закрытия
         if completion_type == 'partial':
             message_text = await generate_partial_notification(
-                request_id, product_name, color, route_list_number, sizes_data
+                request_id, product_name, color, route_list_number, sizes_data, stacks_data
             )
         else:
             message_text = await generate_complete_notification(
@@ -63,7 +64,7 @@ async def notify_assistant(bot, request_id, product_name, color, route_list_numb
     except Exception as e:
         logger.error(f"Ошибка в функции уведомления помощницы: {e}")
 
-async def generate_partial_notification(request_id, product_name, color, route_list_number, sizes_data):
+async def generate_partial_notification(request_id, product_name, color, route_list_number, sizes_data, stacks_data=None):
     """Генерирует текст уведомления для частичного закрытия"""
     # Формируем product_color в формате "Изделие (Цвет)"
     product_color = f"{product_name} ({color})"
@@ -71,7 +72,7 @@ async def generate_partial_notification(request_id, product_name, color, route_l
     text = (
         "🖨️ *Требуется печать штрих-кодов (Частичное закрытие)*\n\n"
         f"*Заявка:* {request_id}\n"
-        f"*Маршрутный лист:* {route_list_number}\n"
+        f"*Номер заявки:* {route_list_number}\n"
         f"*Изделие:* {product_color}\n"
         f"*Тип:* Частичное закрытие\n\n"
         "*Выполненные размеры:*\n"
@@ -79,6 +80,13 @@ async def generate_partial_notification(request_id, product_name, color, route_l
 
     for size, quantity in sorted(sizes_data.items()):
         text += f"  • Размер {size}: {quantity} шт.\n"
+
+    # Добавляем информацию о стопках если есть
+    if stacks_data:
+        text += "\n*Количество стопок:*\n"
+        for size, stacks in sorted(stacks_data.items()):
+            if stacks > 0:
+                text += f"  • Размер {size}: {stacks} стопок\n"
 
     text += f"\n*Всего в этом закрытии:* {sum(sizes_data.values())} шт."
     text += "\n\n⚠️ Подготовьте штрих-коды для указанных размеров и количеств."
@@ -94,20 +102,28 @@ async def generate_complete_notification(request_id, product_name, color, route_
     text = (
         "🖨️ *Требуется печать штрих-кодов (Полное закрытие)*\n\n"
         f"*Заявка:* {request_id}\n"
-        f"*Маршрутный лист:* {route_list_number}\n"
+        f"*Номер заявки:* {route_list_number}\n"
         f"*Изделие:* {product_color}\n"
         f"*Тип:* Полное закрытие\n\n"
         "*Итоговые количества:*\n"
     )
 
     for size, data in total_data.items():
-        text += f"  • Размер {size}: {data['actual']} шт. (из {data['ordered']} заказано)\n"
+        # Добавляем информацию о стопках если есть
+        stacks_info = f", стопок: {data.get('stacks', 0)}" if data.get('stacks', 0) > 0 else ""
+        text += f"  • Размер {size}: {data['actual']} шт. (из {data['ordered']} заказано){stacks_info}\n"
 
     total_ordered = sum(data['ordered'] for data in total_data.values())
     total_actual = sum(data['actual'] for data in total_data.values())
 
     text += f"\n*Итого заказано:* {total_ordered} шт."
     text += f"\n*Итого выполнено:* {total_actual} шт."
+
+    # Добавляем общее количество стопок если есть
+    total_stacks = sum(data.get('stacks', 0) for data in total_data.values())
+    if total_stacks > 0:
+        text += f"\n*Итого стопок:* {total_stacks}"
+
     text += "\n\n⚠️ Подготовьте итоговые штрих-коды для всего заказа."
 
     return text

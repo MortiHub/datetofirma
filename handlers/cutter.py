@@ -172,6 +172,7 @@ async def continue_request(bot, call, user_states, user_data, cutting_requests_s
         await bot.edit_message_text("❌ Произошла ошибка при продолжении заявки.", call.message.chat.id,
                                     call.message.message_id)
 
+
 async def accept_request(bot, call, user_states, user_data, cutting_requests_sheet, request_id):
     user_id = call.from_user.id
 
@@ -199,10 +200,28 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
         cutting_requests_sheet.update_cell(row_idx, 9, cutter_id)
         cutting_requests_sheet.update_cell(row_idx, 10, cutter_name)
 
+        # Получаем данные для уведомления
+        product_name = cutting_requests_sheet.cell(row_idx, 3).value
+        color = cutting_requests_sheet.cell(row_idx, 4).value
         sizes_json = cutting_requests_sheet.cell(row_idx, 18).value
-        sizes_dict = json.loads(sizes_json) if sizes_json else {}
+        ordered_sizes_dict = json.loads(sizes_json) if sizes_json else {}
 
-        if not sizes_dict:
+        # Уведомляем администратора
+        from handlers.admin import notify_admin
+        from datetime import datetime
+        admin_details = {
+            'product_name': product_name,
+            'color': color,
+            'cutter_name': cutter_name,
+            'cutter_id': cutter_id,
+            'accepted_at': datetime.now().strftime("%Y-%m-%d %H:%M"),
+            'ordered_sizes': ordered_sizes_dict
+        }
+
+        users_sheet = cutting_requests_sheet._spreadsheet.worksheet("Users")
+        await notify_admin(bot, request_id, 'accepted', admin_details, users_sheet)
+
+        if not ordered_sizes_dict:
             await bot.edit_message_text(
                 "❌ В заявке не указаны размеры. Свяжитесь с администратором.",
                 call.message.chat.id, call.message.message_id
@@ -211,7 +230,7 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
 
         # Формируем текст с заказанными количествами (при первом принятии это полный заказ)
         sizes_text = "\n📋 Заказанные количества:\n"
-        for size, qty in sorted(sizes_dict.items()):
+        for size, qty in sorted(ordered_sizes_dict.items()):
             sizes_text += f"  • {size}: {qty} шт.\n"
 
         if user_id not in user_data:
@@ -220,16 +239,13 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
             user_data[user_id]['requests'] = {}
         user_data[user_id]['requests'][request_id] = {
             'row_idx': row_idx,
-            'ordered_sizes_dict': sizes_dict,
+            'ordered_sizes_dict': ordered_sizes_dict,
             'actual_sizes_dict': {},
             'stacks_dict': {},
-            'actual_selected_sizes': sorted(sizes_dict.keys()),
+            'actual_selected_sizes': sorted(ordered_sizes_dict.keys()),
             'actual_current_index': 0
         }
         user_data[user_id]['current_request_id'] = request_id
-
-        product_name = cutting_requests_sheet.cell(row_idx, 3).value
-        color = cutting_requests_sheet.cell(row_idx, 4).value
 
         confirmation_text = (
             f"✅ Заявка {request_id} принята!\n\n"
@@ -239,7 +255,8 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
             f"Выберите тип закрытия:"
         )
         keyboard = []
-        keyboard.append([types.InlineKeyboardButton("🔧 Частичное закрытие", callback_data=f"partial_start_{request_id}")])
+        keyboard.append(
+            [types.InlineKeyboardButton("🔧 Частичное закрытие", callback_data=f"partial_start_{request_id}")])
         keyboard.append([types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_completion_{request_id}")])
         reply_markup = types.InlineKeyboardMarkup(keyboard)
         await bot.edit_message_text(
@@ -251,7 +268,8 @@ async def accept_request(bot, call, user_states, user_data, cutting_requests_she
 
     except Exception as e:
         logger.error(f"Ошибка при принятии заявки {request_id}: {e}")
-        await bot.edit_message_text("❌ Произошла ошибка при принятии заявки.", call.message.chat.id, call.message.message_id)
+        await bot.edit_message_text("❌ Произошла ошибка при принятии заявки.", call.message.chat.id,
+                                    call.message.message_id)
 
 async def back_to_cutter(bot, call, user_states, user_data):
     user_id = call.from_user.id
