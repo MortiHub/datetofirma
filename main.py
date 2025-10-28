@@ -50,7 +50,17 @@ async def callback_wrapper(call):
 @bot.message_handler(func=lambda message: True)
 async def text_wrapper(message):
     await text_handler(bot, message, user_states, user_data, cutting_requests_sheet, products_sheet)
+@bot.message_handler(content_types=["photo"])
+async def handle_qc_photos(message):
+    from handlers.quality_control import qc_states  # импортируем состояние
+    user_id = message.from_user.id
+    state = qc_states.get(user_id, {})
 
+    if state.get("state") == "qc_sending_photos":
+        file_id = message.photo[-1].file_id
+        state["photos"].append(file_id)
+        qc_states[user_id] = state
+        await bot.send_message(message.chat.id, f"📸 Фото добавлено ({len(state['photos'])})")
 
 if __name__ == "__main__":
     logger.info("Бот запущен")

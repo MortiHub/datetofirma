@@ -1,6 +1,6 @@
 from telebot import types
 from config import *
-
+from handlers.seamstress import handle_seamstress_callbacks
 from sheets.users import is_authorized, get_user_role, has_pending_request
 from handlers.admin import handle_admin_callbacks
 from handlers.cutter import handle_cutter_callbacks
@@ -11,7 +11,7 @@ import json
 import uuid
 from datetime import datetime
 from handlers.admin import notify_admin
-
+from handlers.quality_control import handle_quality_callbacks
 logger = logging.getLogger(__name__)
 
 
@@ -140,8 +140,13 @@ async def callback_handler(bot, call, user_states, user_data, users_sheet, reque
     if role == "Admin":
         await handle_admin_callbacks(bot, call, user_states, user_data, users_sheet, requests_sheet,
                                      cutting_requests_sheet, products_sheet)
-    elif role in ["Cutter", "Seamstress"]:
+    elif role == "Cutter":
         await handle_cutter_callbacks(bot, call, user_states, user_data, cutting_requests_sheet)
+    elif role == "Seamstress":
+        from handlers.seamstress import handle_seamstress_callbacks
+        await handle_seamstress_callbacks(bot, call, user_states, user_data, cutting_requests_sheet)
+    elif role == "Qc":
+        await handle_quality_callbacks(bot, call, cutting_requests_sheet)
     else:
         await handle_common_callbacks(bot, call, user_states, user_data)
 
@@ -1255,10 +1260,11 @@ async def cancel_request(bot, call, user_states, user_data, users_sheet):
             [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")],
             [types.InlineKeyboardButton("📋 Просмотреть заявки на раскрой", callback_data="view_requests")]
         ]
-    elif role in ["Cutter", "Seamstress"]:
-        keyboard = [
-            [types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]
-        ]
+    elif role == "Cutter":
+        await handle_cutter_callbacks(...)
+    elif role == "Seamstress":
+        await handle_seamstress_callbacks(...)
+
     elif role == "Assistant":
         keyboard = [
             [types.InlineKeyboardButton("📊 Статус печати", callback_data="print_status")],
@@ -1314,6 +1320,10 @@ async def start_callback(bot, call, users_sheet):
                 [types.InlineKeyboardButton("📊 Статус печати", callback_data="print_status")],
                 [types.InlineKeyboardButton("📋 Активные заявки", callback_data="active_requests")]
             ]
+        elif role == "Qc":
+            keyboard = [
+                [types.InlineKeyboardButton("📋 Просмотреть заявки для проверки", callback_data="view_requests_qc")]
+            ]
     else:
         keyboard = [
             [types.InlineKeyboardButton("Подать заявку", callback_data="submit_request")]
@@ -1328,7 +1338,7 @@ async def notify_cutters(bot, request_id, created_at, color, sizes_dict, users_s
     try:
         users = users_sheet.get_all_records()
         for user in users:
-            if user["Role"].strip() in ["Cutter", "Seamstress", "Assistant"]:
+            if user["Role"].strip() in ["Cutter", "Assistant"]:
                 try:
                     keyboard = [[types.InlineKeyboardButton("📋 Просмотреть заявки", callback_data="view_requests")]]
                     reply_markup = types.InlineKeyboardMarkup(keyboard)
