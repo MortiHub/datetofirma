@@ -260,6 +260,19 @@ async def qc_send_defect(bot, call):
             logger.warning(f"Ошибка при отправке админу {admin.get('ID')}: {e}")
 
     # === 🔹 Запись в лист Defects ===
+    # Получаем имя швеи для конкретной стопки
+    seamstresses_data = json.loads(req.get("Швеи стопок", "{}") or "{}")
+    seamstress_name = None
+    if size in seamstresses_data:
+        if isinstance(seamstresses_data[size], dict):
+            seamstress_name = seamstresses_data[size].get(str(stack_num))
+        elif isinstance(seamstresses_data[size], list):
+            # если швеи записаны списком — берём первого
+            seamstress_name = seamstresses_data[size][0]
+    if not seamstress_name:
+        seamstress_name = "Не указана"
+
+    # === 🔹 Запись в лист Defects ===
     defects_sheet.append_row([
         datetime.now().strftime("%d.%m.%Y %H:%M"),
         request_id,
@@ -270,7 +283,7 @@ async def qc_send_defect(bot, call):
         stack_num,
         comment or "",
         ", ".join(photos),
-        qc_name
+        seamstress_name
     ])
 
     qc_states[user_id] = {}

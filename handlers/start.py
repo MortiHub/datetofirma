@@ -18,7 +18,8 @@ async def start_handler(bot, message, users_sheet):
             keyboard = [
                 [types.InlineKeyboardButton("👥 Просмотр заявок на роли", callback_data="requests")],
                 [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")],
-                [types.InlineKeyboardButton("📋 Просмотреть заявки на раскрой", callback_data="view_requests")]
+                [types.InlineKeyboardButton("📋 Просмотреть заявки на раскрой", callback_data="view_requests")],
+                [types.InlineKeyboardButton("📄 Отчёт по браку", callback_data="generate_defects_report")]
             ]
 
         elif role_clean == "cutter":

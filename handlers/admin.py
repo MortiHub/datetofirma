@@ -3,6 +3,7 @@ from datetime import datetime
 from telebot import types
 
 from config import PRODUCT_NAME
+from handlers.reports import generate_defects_report
 from sheets.users import is_authorized, get_user_role
 import logging
 
@@ -110,13 +111,15 @@ async def handle_admin_callbacks(bot, call, user_states, user_data, users_sheet,
             [types.InlineKeyboardButton("👥 Просмотр заявок на роли", callback_data="requests")],
             [types.InlineKeyboardButton("✂️ Создать заявку на раскрой", callback_data="new_cutting_request")],
             [types.InlineKeyboardButton("📋 Просмотреть заявки на раскрой", callback_data="view_requests")]
+
         ]
         reply_markup = types.InlineKeyboardMarkup(keyboard)
         await bot.edit_message_text("Главное меню администратора:", call.message.chat.id, call.message.message_id, reply_markup=reply_markup)
 
     elif callback_data == "new_cutting_request":
         await start_cutting_request(bot, call, user_states, user_data, users_sheet, products_sheet)
-
+    elif callback_data == "generate_defects_report":
+        await generate_defects_report(bot, call, bot._sheets_data["spreadsheet"])
 async def start_cutting_request(bot, call, user_states, user_data, users_sheet, products_sheet):
     user_id = call.from_user.id
     logger.info(f"Попытка создания новой заявки на раскрой пользователем {user_id}")
